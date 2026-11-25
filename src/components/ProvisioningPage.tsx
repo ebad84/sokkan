@@ -7,10 +7,10 @@ interface ProvisioningPageProps {
 }
 
 export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
-  const [panelDomain, setPanelDomain] = useState('panel.example.com');
-  const [caddyEmail, setCaddyEmail] = useState('admin@example.com');
+  const [panelDomain, setPanelDomain] = useState('panel.ceqom.ir');
+  const [caddyEmail, setCaddyEmail] = useState('admin@ceqom.ir');
   const [basicAuthUser, setBasicAuthUser] = useState('admin');
-  const [dockerNetwork, setDockerNetwork] = useState('caddy_net');
+  const [dockerNetwork, setDockerNetwork] = useState('web');
   const [panelPort, setPanelPort] = useState(3000);
   const [includeBeszel, setIncludeBeszel] = useState(true);
   const [configureUfw, setConfigureUfw] = useState(true);

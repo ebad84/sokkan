@@ -1,31 +1,31 @@
 services:
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2
     container_name: caddy
     restart: unless-stopped
+    mem_limit: 150m
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"
     volumes:
-      - ./caddy:/etc/caddy
+      - ./caddy:/etc/caddy:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks:
-      - caddy_net
+    networks: [web]
 
   sokanyar-panel:
     build: .
     container_name: sokanyar-panel
     restart: unless-stopped
+    mem_limit: 300m
     env_file:
       - .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/app/data
       - ./caddy:/etc/caddy
-    networks:
-      - caddy_net
+    networks: [web]
     ports:
       - "127.0.0.1:3000:3000"
 
@@ -33,39 +33,44 @@ services:
     image: henrygd/beszel:latest
     container_name: beszel
     restart: unless-stopped
-    profiles: ["beszel"]
-    networks:
-      - caddy_net
+    mem_limit: 200m
     volumes:
-      - ./beszel_data:/beszel_data
-    ports:
-      - "127.0.0.1:8090:8090"
+      - beszel_data:/beszel_data
+      - beszel_socket:/beszel_socket
+    networks: [web]
 
+  # Agent starts once COMPOSE_PROFILES=agent is enabled via ./enable-agent.sh
   beszel-agent:
     image: henrygd/beszel-agent:latest
     container_name: beszel-agent
     restart: unless-stopped
-    profiles: ["beszel"]
+    mem_limit: 100m
+    profiles: ["agent"]
     network_mode: host
     volumes:
+      - beszel_socket:/beszel_socket
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      LISTEN: "45876"
+      LISTEN: /beszel_socket/beszel.sock
+      KEY: ${BESZEL_KEY:-}
 
   kuma:
     image: louislam/uptime-kuma:2
     container_name: kuma
     restart: unless-stopped
+    mem_limit: 250m
     profiles: ["kuma"]
-    networks:
-      - caddy_net
+    networks: [web]
     volumes:
-      - ./kuma_data:/app/data
+      - kuma_data:/app/data
 
 volumes:
   caddy_data:
   caddy_config:
+  beszel_data:
+  beszel_socket:
+  kuma_data:
 
 networks:
-  caddy_net:
+  web:
     external: true

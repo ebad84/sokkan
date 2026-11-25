@@ -278,7 +278,8 @@ async function executePipeline(
       appendDeployLog(deploymentId, 'فایل متغیرهای محیطی (.env) در فضای کاری نوشته شد.');
     }
 
-    await ensureDockerNetwork('caddy_net');
+    const dockerNetwork = process.env.DOCKER_NETWORK?.trim() || 'web';
+    await ensureDockerNetwork(dockerNetwork);
     const containerName = `sokanyar-${project.slug}`;
 
     if (project.build_mode === 'compose') {
@@ -316,7 +317,7 @@ async function executePipeline(
         throw new Error(`ساخت ایمیج داکر ناموفق بود (کد ${buildCode}).`);
       }
 
-      appendDeployLog(deploymentId, `جایگزینی کانتینر ${containerName} روی شبکه caddy_net...`);
+      appendDeployLog(deploymentId, `جایگزینی کانتینر ${containerName} روی شبکه ${dockerNetwork}...`);
       await runCommandSafe('docker', ['rm', '-f', containerName], workspaceDir, deploymentId).catch(
         () => 0,
       );
@@ -327,7 +328,7 @@ async function executePipeline(
         '--name',
         containerName,
         '--network',
-        'caddy_net',
+        dockerNetwork,
         '--restart',
         'unless-stopped',
         '--label',

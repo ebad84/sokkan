@@ -47,12 +47,23 @@ echo "[1/6] به‌روزرسانی بسته‌های پایه سیستم..."
 sudo apt-get update -y
 sudo apt-get install -y ca-certificates curl gnupg git ufw jq openssl
 
-echo "[2/6] نصب Docker Engine و Docker Compose Plugin..."
+echo "[2/6] نصب Docker از مخزن Ubuntu (سازگار با سرورهای ایران) و تنظیم میرورها..."
+sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources /etc/apt/keyrings/docker.asc
+sudo apt-get update -y
 if ! command -v docker >/dev/null 2>&1; then
-  curl -fsSL https://get.docker.com | sudo sh
-  sudo systemctl enable --now docker
-else
-  echo "Docker از قبل نصب است."
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
+fi
+sudo systemctl enable --now docker
+HUB_CODE=\$(curl -s -o /dev/null -m 10 -w '%{http_code}' https://registry-1.docker.io/v2/ || echo "000")
+if [ "\$HUB_CODE" != "401" ]; then
+  sudo tee /etc/docker/daemon.json >/dev/null <<'JSON'
+{
+  "registry-mirrors": ["https://docker.arvancloud.ir","https://registry.docker.ir"],
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+JSON
+  sudo systemctl restart docker
 fi
 
 ${

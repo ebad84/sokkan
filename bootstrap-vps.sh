@@ -1,100 +1,198 @@
 #!/usr/bin/env bash
+# =====================================================================
+# bootstrap-vps.sh (SokanYar Edition - Iran-friendly Ubuntu 24.04 / 26.04)
+#
+# Merged from bootstrap-v3.sh with SokanYar CI/CD replacing Portainer:
+#   1. Base: apt update/upgrade, Asia/Tehran timezone, unattended-upgrades, 2G swap
+#   2. Security: SSH hardening (no root login), fail2ban (systemd), ufw (22 limit, 80, 443)
+#   3. Docker: installed from Ubuntu repo (docker.io + docker-compose-v2),
+#      auto-enables Iranian registry mirrors (arvancloud / registry.docker.ir)
+#      when Docker Hub is blocked, configures log rotation, creates "web" network
+#   4. Infra (docker compose in this repo directory):
+#        - Caddy          : reverse proxy + automatic HTTPS + Basic Auth
+#        - SokanYar Panel : CI/CD + Docker + Caddy UI (Basic Auth + Admin Login)
+#                           (/api/webhooks/* bypasses Basic Auth for GitHub HMAC)
+#        - Beszel         : server + container history (behind Basic Auth + enable-agent.sh)
+#        - Uptime Kuma    : optional (--profile kuma)
+#
+# Usage: bash bootstrap-vps.sh   (run as normal sudo user, e.g. ubuntu)
+# =====================================================================
 set -euo pipefail
 
-# ==============================================================================
-# سکان‌یار (SokanYar) - اسکریپت راه‌اندازی صفر تا صد سرور VPS
-# مناسب Ubuntu 22.04 / 24.04 و Debian 12
-# احراز هویت پنل به صورت بومی با Caddy Basic Auth انجام می‌شود
-# ==============================================================================
-
+### ---------------- Settings (override via env or interactive prompts) ----------------
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOCKER_NET="${DOCKER_NET:-caddy_net}"
-PANEL_PORT="${PANEL_PORT:-3000}"
+TARGET_USER="${SUDO_USER:-$USER}"
 
-echo "=================================================================="
-echo "  راه‌اندازی خودکار سرور VPS با سکان‌یار (Docker + Caddy Basic Auth)"
-echo "=================================================================="
-
-# دریافت تنظیمات به صورت تعاملی (در صورت نبود متغیر محیطی)
-if [ -z "${PANEL_DOMAIN:-}" ] && [ -t 0 ]; then
-  read -r -p "دامنه پنل را وارد کنید (مثلاً panel.example.com یا خالی برای دسترسی با IP روی پورت 80): " PANEL_DOMAIN
-fi
-PANEL_DOMAIN="${PANEL_DOMAIN:-:80}"
-
-if [ -z "${CADDY_EMAIL:-}" ] && [ -t 0 ]; then
-  read -r -p "ایمیل برای گواهی SSL در Caddy (پیش‌فرض admin@example.com): " CADDY_EMAIL
-fi
-CADDY_EMAIL="${CADDY_EMAIL:-admin@example.com}"
-
-if [ -z "${BASIC_AUTH_USER:-}" ] && [ -t 0 ]; then
-  read -r -p "نام کاربری Caddy Basic Auth برای ورود به پنل (پیش‌فرض admin): " BASIC_AUTH_USER
-fi
+DOMAIN="${DOMAIN:-ceqom.ir}"
+PANEL_SUBDOMAIN="${PANEL_SUBDOMAIN:-panel}"       # -> panel.ceqom.ir
+STATUS_SUBDOMAIN="${STATUS_SUBDOMAIN:-status}"    # -> status.ceqom.ir (Beszel)
+KUMA_SUBDOMAIN="${KUMA_SUBDOMAIN:-kuma}"          # -> kuma.ceqom.ir (optional)
 BASIC_AUTH_USER="${BASIC_AUTH_USER:-admin}"
+CADDY_EMAIL="${CADDY_EMAIL:-}"
 
-GENERATED_PASS="false"
-if [ -z "${BASIC_AUTH_PASS:-}" ] && [ -t 0 ]; then
-  read -r -s -p "رمز عبور Caddy Basic Auth (خالی بگذارید تا رمز تصادفی ساخته شود): " BASIC_AUTH_PASS
-  echo ""
-fi
-if [ -z "${BASIC_AUTH_PASS:-}" ]; then
-  BASIC_AUTH_PASS="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16)"
-  GENERATED_PASS="true"
-fi
+TIMEZONE="Asia/Tehran"
+SWAP_SIZE="2G"
+SWAP_SWAPPINESS="10"
+ALLOW_PASSWORD_LOGIN="yes"                        # yes | no
+DOCKER_MIRRORS='["https://docker.arvancloud.ir","https://registry.docker.ir"]'
+DOCKER_NET="web"
+PANEL_PORT="3000"
+### ------------------------------------------------------------------------------------
 
-if [ -z "${INCLUDE_BESZEL:-}" ] && [ -t 0 ]; then
-  read -r -p "آیا ابزار سبک Beszel برای نمودار تاریخچه منابع نصب شود؟ [Y/n]: " ans_beszel
-  case "${ans_beszel:-Y}" in
-    [nN]|[nN][oO]) INCLUDE_BESZEL="false" ;;
-    *) INCLUDE_BESZEL="true" ;;
+log()  { echo -e "\n\033[1;32m[+] $*\033[0m"; }
+warn() { echo -e "\n\033[1;33m[!] $*\033[0m"; }
+
+sudo -v
+
+if [ -t 0 ]; then
+  echo "=================================================================="
+  echo "  راه‌اندازی سرور VPS با سکان‌یار (مناسب سرورهای ایران / ۲ گیگ رم)"
+  echo "=================================================================="
+  read -r -p "دامنه اصلی سرور (پیش‌فرض ${DOMAIN}): " IN_DOMAIN
+  DOMAIN="${IN_DOMAIN:-$DOMAIN}"
+
+  read -r -p "ساب‌دامین پنل سکان‌یار (پیش‌فرض ${PANEL_SUBDOMAIN} -> ${PANEL_SUBDOMAIN}.${DOMAIN}): " IN_PANEL_SUB
+  PANEL_SUBDOMAIN="${IN_PANEL_SUB:-$PANEL_SUBDOMAIN}"
+
+  read -r -p "ساب‌دامین Beszel (پیش‌فرض ${STATUS_SUBDOMAIN} -> ${STATUS_SUBDOMAIN}.${DOMAIN}): " IN_STATUS_SUB
+  STATUS_SUBDOMAIN="${IN_STATUS_SUB:-$STATUS_SUBDOMAIN}"
+
+  read -r -p "ایمیل برای گواهی SSL در Caddy (اختیاری): " IN_EMAIL
+  CADDY_EMAIL="${IN_EMAIL:-$CADDY_EMAIL}"
+
+  read -r -p "نام کاربری Caddy Basic Auth (پیش‌فرض ${BASIC_AUTH_USER}): " IN_USER
+  BASIC_AUTH_USER="${IN_USER:-$BASIC_AUTH_USER}"
+
+  read -r -p "آیا Uptime Kuma هم فعال شود؟ [y/N]: " ANS_KUMA
+  case "${ANS_KUMA:-N}" in
+    [yY]|[yY][eE][sS]) INCLUDE_KUMA="yes" ;;
+    *) INCLUDE_KUMA="no" ;;
   esac
+else
+  INCLUDE_KUMA="${INCLUDE_KUMA:-no}"
 fi
-INCLUDE_BESZEL="${INCLUDE_BESZEL:-true}"
 
-if [ -z "${INCLUDE_KUMA:-}" ] && [ -t 0 ]; then
-  read -r -p "آیا Uptime Kuma هم نصب شود؟ [y/N]: " ans_kuma
-  case "${ans_kuma:-N}" in
-    [yY]|[yY][eE][sS]) INCLUDE_KUMA="true" ;;
-    *) INCLUDE_KUMA="false" ;;
-  esac
-fi
-INCLUDE_KUMA="${INCLUDE_KUMA:-false}"
+PANEL_FQDN="${PANEL_SUBDOMAIN}.${DOMAIN}"
+STATUS_FQDN="${STATUS_SUBDOMAIN}.${DOMAIN}"
+KUMA_FQDN="${KUMA_SUBDOMAIN}.${DOMAIN}"
 
-echo "[1/7] به‌روزرسانی بسته‌های پایه سیستم..."
-sudo apt-get update -y
-sudo apt-get install -y ca-certificates curl gnupg git ufw jq openssl
+############################ BASE SYSTEM ############################
+log "1/11 System update + base packages"
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  ca-certificates curl git jq openssl ufw fail2ban unattended-upgrades python3-systemd htop ncdu
+sudo timedatectl set-timezone "$TIMEZONE"
 
-echo "[2/7] بررسی حافظه Swap (برای پایداری بیلد داکر روی سرورهای 2GB رم)..."
-if [ "$(swapon --show | wc -l)" -eq 0 ] && [ ! -f /swapfile ]; then
-  sudo fallocate -l 2G /swapfile
-  sudo chmod 600 /swapfile
-  sudo mkswap /swapfile
+log "2/11 Automatic security updates"
+sudo systemctl unmask unattended-upgrades 2>/dev/null || true
+printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' \
+  | sudo tee /etc/apt/apt.conf.d/20auto-upgrades >/dev/null
+sudo systemctl enable --now unattended-upgrades
+
+log "3/11 Swap (${SWAP_SIZE})"
+if ! swapon --show | grep -q /swapfile; then
+  if [ ! -f /swapfile ]; then
+    sudo fallocate -l "$SWAP_SIZE" /swapfile
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+  fi
   sudo swapon /swapfile
-  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
-  echo "فایل Swap با حجم 2GB فعال شد."
-else
-  echo "حافظه Swap از قبل فعال است."
 fi
+grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+echo "vm.swappiness=${SWAP_SWAPPINESS}" | sudo tee /etc/sysctl.d/99-swap.conf >/dev/null
+sudo sysctl --system >/dev/null
 
-echo "[3/7] نصب Docker Engine و Docker Compose Plugin..."
-if ! command -v docker >/dev/null 2>&1; then
-  curl -fsSL https://get.docker.com | sudo sh
-  sudo systemctl enable --now docker
-else
-  echo "Docker از قبل نصب است."
-fi
+log "4/11 SSH hardening (port stays 22)"
+sudo tee /etc/ssh/sshd_config.d/00-hardening.conf >/dev/null <<SSH
+PermitRootLogin no
+PasswordAuthentication ${ALLOW_PASSWORD_LOGIN}
+KbdInteractiveAuthentication no
+MaxAuthTries 3
+LoginGraceTime 30
+SSH
+sudo sshd -t
+sudo systemctl restart ssh
 
-echo "[4/7] پیکربندی فایروال UFW (باز کردن 22, 80, 443)..."
-sudo ufw allow OpenSSH >/dev/null 2>&1 || sudo ufw allow 22/tcp
+log "5/11 Fail2ban"
+sudo tee /etc/fail2ban/jail.d/sshd.local >/dev/null <<'F2B'
+[sshd]
+enabled = true
+backend = systemd
+maxretry = 3
+findtime = 10m
+bantime = 24h
+F2B
+sudo systemctl enable fail2ban
+sudo systemctl restart fail2ban
+sleep 3
+
+log "6/11 Firewall (ufw)"
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw limit 22/tcp
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 sudo ufw allow 443/udp
 sudo ufw --force enable
 
-echo "[5/7] ساخت پوشه‌های داده و شبکه مشترک داکر (${DOCKER_NET})..."
-mkdir -p "${INSTALL_DIR}/data/workspaces" "${INSTALL_DIR}/caddy" "${INSTALL_DIR}/beszel_data" "${INSTALL_DIR}/kuma_data"
-sudo docker network inspect "${DOCKER_NET}" >/dev/null 2>&1 || sudo docker network create "${DOCKER_NET}"
+############################ DOCKER (IRAN-FRIENDLY) ############################
+log "7/11 Docker (from Ubuntu repository — works on Iranian VPS without 403)"
+# Remove broken download.docker.com apt source if an earlier attempt left one
+sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources /etc/apt/keyrings/docker.asc
+sudo apt-get update
+if ! command -v docker >/dev/null 2>&1; then
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
+elif ! docker compose version >/dev/null 2>&1; then
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-v2
+fi
+sudo systemctl enable --now docker
+if [ "$TARGET_USER" != "root" ]; then
+  sudo usermod -aG docker "$TARGET_USER" || true
+fi
 
-echo "[6/7] تولید کلیدهای امنیتی (.env) و فایل Caddyfile با Basic Auth (لایه اول امنیت)..."
+log "8/11 Docker config (log limits + Iran registry mirrors if Docker Hub is blocked)"
+HUB_CODE=$(curl -s -o /dev/null -m 10 -w '%{http_code}' https://registry-1.docker.io/v2/ || echo "000")
+echo "Docker Hub HTTP code: ${HUB_CODE}"
+if [ "$HUB_CODE" = "401" ]; then
+  sudo tee /etc/docker/daemon.json >/dev/null <<'JSON'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+JSON
+else
+  warn "Docker Hub blocked/unreachable (${HUB_CODE}) -> enabling Iranian registry mirrors"
+  sudo tee /etc/docker/daemon.json >/dev/null <<JSON
+{
+  "registry-mirrors": ${DOCKER_MIRRORS},
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+JSON
+fi
+sudo systemctl restart docker
+sleep 5
+sudo docker network inspect "$DOCKER_NET" >/dev/null 2>&1 || sudo docker network create "$DOCKER_NET"
+sudo docker pull hello-world >/dev/null 2>&1 && echo "Docker pull test OK" || warn "Docker pull test FAILED: check mirrors in /etc/docker/daemon.json"
+
+############################ DNS + ACME CHECK ############################
+log "9/11 DNS + Let's Encrypt reachability check"
+for h in "$DOMAIN" "$PANEL_FQDN" "$STATUS_FQDN"; do
+  if getent hosts "$h" >/dev/null 2>&1; then
+    echo "DNS OK: $h -> $(getent hosts "$h" | awk '{print $1}')"
+  else
+    warn "DNS for $h not resolving yet. Add an A record (or wildcard *.${DOMAIN}) to this server's IP."
+  fi
+done
+printf "Let's Encrypt: "
+curl -s -o /dev/null -m 10 -w '%{http_code}\n' https://acme-v02.api.letsencrypt.org/directory || echo "FAIL"
+
+############################ INFRA + SOKANYAR ############################
+log "10/11 Generating .env, Caddyfile (Basic Auth), and enable-agent.sh in ${INSTALL_DIR}"
+cd "$INSTALL_DIR"
+mkdir -p "${INSTALL_DIR}/data/workspaces" "${INSTALL_DIR}/caddy"
+
 if [ ! -f "${INSTALL_DIR}/.env" ]; then
   SESSION_SECRET="$(openssl rand -hex 32)"
   DATA_ENCRYPTION_KEY="$(openssl rand -hex 32)"
@@ -105,87 +203,154 @@ SESSION_SECRET=${SESSION_SECRET}
 DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY}
 DATA_DIR=/app/data
 WORKSPACES_DIR=/app/data/workspaces
+DOCKER_NETWORK=${DOCKER_NET}
 CADDYFILE_PATH=/etc/caddy/Caddyfile
 CADDY_ADMIN_URL=http://caddy:2019
+BESZEL_KEY=
 EOF
   chmod 600 "${INSTALL_DIR}/.env"
-  echo "فایل .env جدید با کلیدهای تصادفی ساخته شد."
+  echo "Created .env with secure random keys."
 else
-  echo "فایل .env از قبل وجود دارد (حفظ شد)."
+  grep -q '^DOCKER_NETWORK=' "${INSTALL_DIR}/.env" || echo "DOCKER_NETWORK=${DOCKER_NET}" >> "${INSTALL_DIR}/.env"
+  grep -q '^BESZEL_KEY=' "${INSTALL_DIR}/.env" || echo "BESZEL_KEY=" >> "${INSTALL_DIR}/.env"
+  echo "Existing .env preserved."
 fi
 
+GENERATED_PASS="no"
+BASIC_AUTH_HASH=""
 if [ ! -f "${INSTALL_DIR}/caddy/Caddyfile" ]; then
-  echo "در حال ساخت هش امن bcrypt برای Caddy Basic Auth..."
-  BASIC_AUTH_HASH="$(sudo docker run --rm caddy:2-alpine caddy hash-password --plaintext "${BASIC_AUTH_PASS}")"
+  if [ -z "${BASIC_AUTH_PASS:-}" ] && [ -t 0 ]; then
+    echo "رمز عبور Caddy Basic Auth (لایه اول امنیت برای پنل و Beszel) را وارد کنید:"
+    read -rsp "Password (خالی = تولید رمز تصادفی): " PASS1; echo
+    if [ -n "$PASS1" ]; then
+      read -rsp "Repeat: " PASS2; echo
+      [ "$PASS1" = "$PASS2" ] || { echo "رمزها مطابقت ندارند."; exit 1; }
+      BASIC_AUTH_PASS="$PASS1"
+      unset PASS1 PASS2
+    fi
+  fi
+  if [ -z "${BASIC_AUTH_PASS:-}" ]; then
+    BASIC_AUTH_PASS="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16)"
+    GENERATED_PASS="yes"
+  fi
+
+  echo "Generating bcrypt hash via caddy:2..."
+  BASIC_AUTH_HASH="$(sudo docker run --rm caddy:2 caddy hash-password --plaintext "$BASIC_AUTH_PASS")"
+
   {
     printf '{\n'
-    printf '  email %s\n' "${CADDY_EMAIL}"
+    if [ -n "$CADDY_EMAIL" ]; then
+      printf '  email %s\n' "$CADDY_EMAIL"
+    fi
     printf '  admin 0.0.0.0:2019\n'
     printf '}\n\n'
-    printf '%s {\n' "${PANEL_DOMAIN}"
+
+    printf '%s {\n' "$DOMAIN"
+    printf '  respond "%s is up"\n' "$DOMAIN"
+    printf '}\n\n'
+
+    printf '%s {\n' "$PANEL_FQDN"
     printf '  encode zstd gzip\n\n'
     printf '  handle /api/webhooks/* {\n'
-    printf '    reverse_proxy sokanyar-panel:%s\n' "${PANEL_PORT}"
+    printf '    reverse_proxy sokanyar-panel:%s\n' "$PANEL_PORT"
     printf '  }\n\n'
     printf '  handle {\n'
     printf '    basic_auth {\n'
-    printf '      %s %s\n' "${BASIC_AUTH_USER}" "${BASIC_AUTH_HASH}"
+    printf '      %s %s\n' "$BASIC_AUTH_USER" "$BASIC_AUTH_HASH"
     printf '    }\n'
-    printf '    reverse_proxy sokanyar-panel:%s {\n' "${PANEL_PORT}"
+    printf '    reverse_proxy sokanyar-panel:%s {\n' "$PANEL_PORT"
     printf '      header_up X-Forwarded-User {http.auth.user.id}\n'
     printf '    }\n'
     printf '  }\n'
     printf '}\n\n'
+
+    printf '%s {\n' "$STATUS_FQDN"
+    printf '  basic_auth {\n'
+    printf '    %s %s\n' "$BASIC_AUTH_USER" "$BASIC_AUTH_HASH"
+    printf '  }\n'
+    printf '  reverse_proxy beszel:8090\n'
+    printf '}\n\n'
+
+    if [ "$INCLUDE_KUMA" = "yes" ]; then
+      printf '%s {\n' "$KUMA_FQDN"
+      printf '  basic_auth {\n'
+      printf '    %s %s\n' "$BASIC_AUTH_USER" "$BASIC_AUTH_HASH"
+      printf '  }\n'
+      printf '  reverse_proxy kuma:3001\n'
+      printf '}\n\n'
+    fi
+
     printf '# BEGIN MANAGED ROUTES\n'
-    printf '# مسیرهای پروژه‌ها به صورت خودکار توسط پنل سکان‌یار در اینجا مدیریت می‌شوند\n'
+    printf '# مسیرهای پروژه‌های سکان‌یار به صورت خودکار در اینجا مدیریت می‌شوند\n'
     printf '# END MANAGED ROUTES\n'
   } > "${INSTALL_DIR}/caddy/Caddyfile"
-  echo "فایل caddy/Caddyfile با احراز هویت Basic Auth ساخته شد."
+  echo "Created caddy/Caddyfile with Basic Auth."
 else
-  echo "فایل caddy/Caddyfile از قبل وجود دارد (بدون تغییر باقی ماند)."
+  echo "Existing caddy/Caddyfile preserved."
 fi
 
-echo "[7/7] ساخت ایمیج و بالا آوردن سرویس‌ها..."
-cd "${INSTALL_DIR}"
-PROFILE_ARGS=()
-if [ "${INCLUDE_BESZEL}" = "true" ]; then
-  PROFILE_ARGS+=(--profile beszel)
+# Beszel agent activation helper (matches bootstrap-v3.sh workflow)
+cat > "${INSTALL_DIR}/enable-agent.sh" <<'HELPER'
+#!/usr/bin/env bash
+# Usage: ./enable-agent.sh
+# Paste the Public Key shown in Beszel (Add System). Starts beszel-agent.
+set -euo pipefail
+cd "$(dirname "$0")"
+read -rp "Paste the Beszel public key (ssh-ed25519 ...): " KEY
+[ -n "$KEY" ] || { echo "Empty key."; exit 1; }
+grep -v '^BESZEL_KEY=' .env | grep -v '^COMPOSE_PROFILES=' > .env.tmp || true
+mv .env.tmp .env
+printf 'BESZEL_KEY="%s"\nCOMPOSE_PROFILES=agent\n' "$KEY" >> .env
+chmod 600 .env
+sudo docker compose up -d
+sleep 3
+sudo docker logs beszel-agent --tail 15
+echo
+echo "Now go to Beszel and click Add System (host: /beszel_socket/beszel.sock)."
+HELPER
+chmod +x "${INSTALL_DIR}/enable-agent.sh"
+
+# Fix directory ownership back to normal user
+if [ "$TARGET_USER" != "root" ]; then
+  sudo chown -R "${TARGET_USER}:${TARGET_USER}" "$INSTALL_DIR"
 fi
-if [ "${INCLUDE_KUMA}" = "true" ]; then
+
+log "11/11 Validating Caddyfile and starting stack (Caddy + SokanYar + Beszel)"
+sudo docker compose config -q && echo "docker-compose.yml OK"
+sudo docker run --rm -v "${INSTALL_DIR}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 \
+  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 && echo "Caddyfile OK" || warn "Caddyfile validation failed!"
+
+PROFILE_ARGS=()
+if [ "$INCLUDE_KUMA" = "yes" ]; then
   PROFILE_ARGS+=(--profile kuma)
 fi
 
 sudo docker compose "${PROFILE_ARGS[@]}" up -d --build
 
-echo ""
-echo "بررسی سلامت سرویس پنل..."
-for i in $(seq 1 20); do
+echo "Waiting for SokanYar health check..."
+for i in $(seq 1 25); do
   if curl -fsS "http://127.0.0.1:${PANEL_PORT}/api/health" >/dev/null 2>&1; then
-    echo "سرویس سکان‌یار با موفقیت فعال شد!"
+    echo "SokanYar is UP and healthy!"
     break
   fi
   sleep 2
 done
 
-echo "=================================================================="
-echo "راه‌اندازی کامل شد (احراز هویت دو لایه فعال است)."
-if [ "${PANEL_DOMAIN}" = ":80" ]; then
-  SERVER_IP="$(curl -fsS https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
-  echo "آدرس پنل: http://${SERVER_IP}"
-else
-  echo "آدرس پنل: https://${PANEL_DOMAIN}"
-fi
-echo "لایه ۱ (Caddy Basic Auth):"
-echo "  نام کاربری: ${BASIC_AUTH_USER}"
-if [ "${GENERATED_PASS}" = "true" ]; then
-  echo "  رمز عبور تولیدشده: ${BASIC_AUTH_PASS}"
-else
-  echo "  رمز عبور: (رمزی که خودتان وارد کردید)"
-fi
-echo "لایه ۲ (لاگین مدیر سکان‌یار):"
-echo "  پس از عبور از Basic Auth، در اولین ورود رمز عبور مدیر پنل را تنظیم و وارد شوید."
-echo "نکته: مسیر /api/webhooks/* از Basic Auth مستثنی شده تا Webhook گیتهاب بدون مشکل کار کند."
-if [ "${INCLUDE_BESZEL}" = "true" ]; then
-  echo "آدرس داخلی Beszel برای اتصال داخل داشبورد: http://beszel:8090"
-fi
-echo "=================================================================="
+sudo docker compose ps
+
+log "Done!"
+cat <<EOM
+
+NEXT STEPS
+ 1. Log out/in once so the 'docker' group applies to ${TARGET_USER}.
+ 2. Open SokanYar CI/CD Panel:  https://${PANEL_FQDN}
+      - Layer 1 (Caddy Basic Auth): user=${BASIC_AUTH_USER} $([ "$GENERATED_PASS" = "yes" ] && echo "pass=${BASIC_AUTH_PASS}" || echo "(your chosen password)")
+      - Layer 2 (Admin Login): set your SokanYar admin password on first visit.
+      - Note: /api/webhooks/* bypasses Basic Auth so GitHub Webhooks work cleanly.
+ 3. Open Beszel Monitoring:     https://${STATUS_FQDN}
+      a) Create admin user in Beszel
+      b) Click "Add System": Name=ceqom, Host=/beszel_socket/beszel.sock
+      c) Copy Public Key and run:  ${INSTALL_DIR}/enable-agent.sh
+      d) In SokanYar Overview -> Connect Beszel API with URL: http://beszel:8090
+ 4. Check Caddy certificate logs:  cd ${INSTALL_DIR} && sudo docker compose logs -f caddy
+EOM
