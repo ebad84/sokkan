@@ -72,9 +72,19 @@ else
   INCLUDE_KUMA="${INCLUDE_KUMA:-no}"
 fi
 
-PANEL_FQDN="${PANEL_SUBDOMAIN}.${DOMAIN}"
-STATUS_FQDN="${STATUS_SUBDOMAIN}.${DOMAIN}"
-KUMA_FQDN="${KUMA_SUBDOMAIN}.${DOMAIN}"
+resolve_fqdn() {
+  local input="$1"
+  local base="$2"
+  if [[ "$input" == *.* ]]; then
+    echo "$input"
+  else
+    echo "${input}.${base}"
+  fi
+}
+
+PANEL_FQDN="$(resolve_fqdn "$PANEL_SUBDOMAIN" "$DOMAIN")"
+STATUS_FQDN="$(resolve_fqdn "$STATUS_SUBDOMAIN" "$DOMAIN")"
+KUMA_FQDN="$(resolve_fqdn "$KUMA_SUBDOMAIN" "$DOMAIN")"
 
 ############################ BASE SYSTEM ############################
 log "1/11 System update + base packages"
