@@ -24,7 +24,7 @@ sudo bash bootstrap-vps.sh
 - فعال‌سازی ۲ گیگابایت `Swap` در صورت نبود (مناسب سرورهای ۲ گیگابایت رم)
 - پیکربندی فایروال `UFW` برای پورت‌های `22`، `80` و `443`
 - تنظیم **Caddy Basic Auth** با هش امن `bcrypt` و مستثنی کردن مسیر `/api/webhooks/*` برای دریافت بی‌دردسر Webhook گیتهاب
-- ساخت شبکه مشترک `caddy_net` و تولید کلیدهای امنیتی یکتا در `.env`
+- ساخت شبکه مشترک `web` و تولید کلیدهای امنیتی یکتا در `.env`
 - راه‌اندازی `Caddy` و `سکان‌یار` (و در صورت تمایل `Beszel` و `Uptime Kuma`)
 
 ۳. مرورگر را روی دامنه (یا IP سرور) باز کنید:
@@ -36,5 +36,15 @@ sudo bash bootstrap-vps.sh
 برای تولید هش رمز جدید و جایگزینی در بخش `basic_auth` فایل `caddy/Caddyfile`:
 
 ```bash
-sudo docker run --rm caddy:2-alpine caddy hash-password --plaintext "NEW_PASSWORD"
+sudo docker run --rm caddy:2 caddy hash-password --plaintext "NEW_PASSWORD"
 ```
+
+## نقشه راه و TODO (برنامه‌های آینده)
+
+- [ ] **اتصال مستقیم به API ابر آروان (ArvanCloud CDN & DNS):**
+  - ثبت، ویرایش و حذف خودکار رکوردهای DNS (`A` / `AAAA` / `CNAME`) هنگام ساخت یا تغییر دامنه پروژه در سکان‌یار.
+  - مدیریت خودکار وضعیت ابر/پروکسی CDN (خاموش کردن موقت پروکسی هنگام صدور اولیه گواهی SSL در Caddy و فعال‌سازی مجدد یا تنظیم حالت SSL روی Full/Strict).
+  - پاک‌سازی کش CDN (Purge Cache) به‌صورت خودکار پس از هر دیپلوی موفق پروژه.
+  - همگام‌سازی لیست ساب‌دامین‌های ثبت‌شده در پنل ابر آروان با مسیرهای Caddy.
+- [ ] پشتیبانی از پیش‌نمایش Pull Requestها (Preview Deployments) با ساب‌دامین موقت.
+- [ ] اعلان وضعیت بیلد و دیپلوی از طریق Telegram / Bale / Webhook دلخواه.

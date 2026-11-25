@@ -196,9 +196,10 @@ async function executePipeline(
           deploymentId,
           `دستور معادل روی VPS: docker build -t ${containerName}:latest -f ${project.build_file_path} ${project.dockerfile_context}`,
         );
+        const previewNet = process.env.DOCKER_NETWORK?.trim() || 'web';
         appendDeployLog(
           deploymentId,
-          `دستور اجرا روی شبکه Caddy: docker run -d --name ${containerName} --network caddy_net --restart unless-stopped ${containerName}:latest`,
+          `دستور اجرا روی شبکه Caddy: docker run -d --name ${containerName} --network ${previewNet} --restart unless-stopped ${containerName}:latest`,
         );
       }
 

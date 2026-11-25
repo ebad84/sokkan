@@ -16,6 +16,25 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiFetch, streamDeploymentLogs } from '../api';
 import type { Deployment, GitHubInspectionResult, Project } from '../types';
 
+function extractRepoNameFromUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
+  if (!trimmed) return '';
+  // Accept https://github.com/owner/repo, git@github.com:owner/repo, or owner/repo
+  const normalized = trimmed
+    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+    .replace(/^git@github\.com:/i, '');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length < 2) return '';
+  return parts[1].trim();
+}
+
+function toContainerSlug(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 interface DeploymentDrawerProps {
   deploymentId: string | null;
   projects: Project[];
@@ -185,6 +204,8 @@ export function ProjectsPage({
 
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
+  const [nameTouched, setNameTouched] = useState(false);
+  const [slugTouched, setSlugTouched] = useState(false);
   const [branch, setBranch] = useState('main');
   const [buildMode, setBuildMode] = useState<'dockerfile' | 'compose'>('dockerfile');
   const [buildFilePath, setBuildFilePath] = useState('Dockerfile');
@@ -243,14 +264,9 @@ export function ProjectsPage({
         }),
       });
       setInspectResult(res);
-      if (!name) setName(res.repo);
-      if (!slug) {
-        setSlug(
-          res.repo
-            .toLowerCase()
-            .replace(/[^a-z0-9-]+/g, '-')
-            .replace(/^-+|-+$/g, ''),
-        );
+      if (!nameTouched || !name.trim()) setName(res.repo);
+      if (!slugTouched || !slug.trim()) {
+        setSlug(toContainerSlug(res.repo));
       }
       setBranch(res.defaultBranch);
       setBuildMode(res.detectedBuildMode === 'compose' ? 'compose' : 'dockerfile');
@@ -275,6 +291,8 @@ export function ProjectsPage({
     setInspectError('');
     setName('');
     setSlug('');
+    setNameTouched(false);
+    setSlugTouched(false);
     setBranch('main');
     setBuildMode('dockerfile');
     setBuildFilePath('Dockerfile');
@@ -726,7 +744,15 @@ export function ProjectsPage({
                     type="text"
                     required
                     value={repoUrl}
-                    onChange={(e) => setRepoUrl(e.target.value)}
+                    onChange={(e) => {
+                      const nextUrl = e.target.value;
+                      setRepoUrl(nextUrl);
+                      const derived = extractRepoNameFromUrl(nextUrl);
+                      if (derived) {
+                        if (!nameTouched) setName(derived);
+                        if (!slugTouched) setSlug(toContainerSlug(derived));
+                      }
+                    }}
                     placeholder="https://github.com/username/my-app"
                     className="flex-1 bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3.5 py-2.5 text-slate-100 font-mono focus:outline-none focus:border-sky-500"
                   />
@@ -785,8 +811,11 @@ export function ProjectsPage({
                     type="text"
                     required
                     value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="سرویس API فروشگاه"
+                    onChange={(e) => {
+                      setName(e.target.value);
+                      setNameTouched(e.target.value.trim().length > 0);
+                    }}
+                    placeholder="test-sokkan1"
                     className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-sky-500"
                   />
                 </div>
@@ -796,8 +825,11 @@ export function ProjectsPage({
                     type="text"
                     required
                     value={slug}
-                    onChange={(e) => setSlug(e.target.value)}
-                    placeholder="shop-api"
+                    onChange={(e) => {
+                      setSlug(e.target.value);
+                      setSlugTouched(e.target.value.trim().length > 0);
+                    }}
+                    placeholder="test-sokkan1"
                     className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-sky-500"
                   />
                 </div>
@@ -836,7 +868,7 @@ export function ProjectsPage({
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-300 mb-1">پورت داخلی سرویس</label>
+                  <label className="block text-slate-300 mb-1">پورت داخلی سرویس (درون کانتینر)</label>
                   <input
                     type="number"
                     min={1}
@@ -845,6 +877,9 @@ export function ProjectsPage({
                     onChange={(e) => setContainerPort(Number(e.target.value))}
                     className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono tabular-nums focus:outline-none focus:border-sky-500"
                   />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    هر کانتینر روی شبکه داخلی ایزوله است؛ مشترک بودن پورت 80 یا 3000 بین پروژه‌ها تداخلی ندارد.
+                  </p>
                 </div>
               </div>
 

@@ -89,7 +89,12 @@ export default function App() {
     }
   }, [authStatus?.authenticated, loadDashboardData]);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Clear local state regardless
+    }
     setAuthToken(null);
     setAuthStatus((prev) => (prev ? { ...prev, authenticated: false } : null));
   };

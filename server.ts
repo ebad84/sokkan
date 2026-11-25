@@ -167,6 +167,62 @@ function serializeProject(p: ProjectRow) {
   };
 }
 
+const SESSION_COOKIE_NAME = 'sokanyar_session';
+const SESSION_TTL_DAYS = Math.max(1, Math.min(90, Number(process.env.SESSION_TTL_DAYS || 30)));
+const SESSION_TTL_MS = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
+
+function readCookieValue(req: Request, cookieName: string): string {
+  const header = req.header('cookie');
+  if (!header) return '';
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    if (key === cookieName) {
+      try {
+        return decodeURIComponent(part.slice(idx + 1).trim());
+      } catch {
+        return part.slice(idx + 1).trim();
+      }
+    }
+  }
+  return '';
+}
+
+function isHttpsRequest(req: Request): boolean {
+  const forwardedProto = (req.header('x-forwarded-proto') ?? '').split(',')[0].trim().toLowerCase();
+  return req.secure || forwardedProto === 'https';
+}
+
+function setSessionCookie(req: Request, res: Response, token: string): void {
+  const maxAgeSec = Math.floor(SESSION_TTL_MS / 1000);
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${maxAgeSec}`,
+  ];
+  if (isHttpsRequest(req)) {
+    parts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function clearSessionCookie(req: Request, res: Response): void {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=0',
+  ];
+  if (isHttpsRequest(req)) {
+    parts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
 function extractPanelToken(req: Request): string {
   const customHeader = req.header('x-panel-token')?.trim();
   if (customHeader) {
@@ -175,6 +231,10 @@ function extractPanelToken(req: Request): string {
   const authHeader = req.header('authorization') ?? '';
   if (authHeader.startsWith('Bearer ')) {
     return authHeader.slice('Bearer '.length).trim();
+  }
+  const cookieToken = readCookieValue(req, SESSION_COOKIE_NAME);
+  if (cookieToken) {
+    return cookieToken;
   }
   return '';
 }
@@ -237,8 +297,9 @@ app.post('/api/auth/setup', (req, res) => {
     res.status(409).json({ error: 'رمز مدیر قبلاً ثبت شده است.' });
     return;
   }
-  const exp = Date.now() + 24 * 60 * 60 * 1000;
+  const exp = Date.now() + SESSION_TTL_MS;
   const token = signSessionToken({ role: 'admin', exp });
+  setSessionCookie(req, res, token);
   res.status(201).json({ token, expiresAt: exp });
 });
 
@@ -267,9 +328,15 @@ app.post('/api/auth/login', (req, res) => {
     return;
   }
 
-  const exp = Date.now() + 24 * 60 * 60 * 1000;
+  const exp = Date.now() + SESSION_TTL_MS;
   const token = signSessionToken({ role: 'admin', exp });
+  setSessionCookie(req, res, token);
   res.json({ token, expiresAt: exp });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
 });
 
 // Protected System Status & Telemetry
@@ -338,8 +405,9 @@ app.get('/api/projects', requireAuth, (_req, res) => {
 app.post('/api/projects', requireAuth, async (req, res) => {
   try {
     const body = req.body ?? {};
-    const name = String(body.name || '').trim();
-    const rawSlug = String(body.slug || '')
+    const { canonicalUrl, repo } = parseGitHubRepoUrl(String(body.repoUrl || ''));
+    const name = String(body.name || '').trim() || repo;
+    const rawSlug = String(body.slug || repo)
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9-]+/g, '-')
@@ -349,7 +417,6 @@ app.post('/api/projects', requireAuth, async (req, res) => {
       return;
     }
 
-    const { canonicalUrl } = parseGitHubRepoUrl(String(body.repoUrl || ''));
     const branch = validateBranchName(String(body.branch || 'main'));
     const buildMode = body.buildMode === 'compose' ? 'compose' : 'dockerfile';
     const buildFilePath = String(body.buildFilePath || (buildMode === 'compose' ? 'docker-compose.yml' : 'Dockerfile')).trim();
@@ -360,11 +427,22 @@ app.post('/api/projects', requireAuth, async (req, res) => {
       return;
     }
 
-    const domain = String(body.domain || '').trim();
+    const domain = String(body.domain || '').trim().toLowerCase();
     const caddyEnabled = body.caddyEnabled !== false;
     if (domain && !validateDomainString(domain)) {
       res.status(400).json({ error: 'فرمت دامنه وارد شده برای Caddy معتبر نیست.' });
       return;
+    }
+    if (domain && caddyEnabled) {
+      const domainConflict = db
+        .prepare('SELECT name FROM projects WHERE LOWER(domain) = ? AND caddy_enabled = 1')
+        .get(domain) as { name: string } | undefined;
+      if (domainConflict) {
+        res.status(409).json({
+          error: `دامنه «${domain}» قبلاً به پروژه «${domainConflict.name}» متصل شده است.`,
+        });
+        return;
+      }
     }
 
     const caddyExtraDirectives = String(body.caddyExtraDirectives || '');
@@ -458,13 +536,24 @@ app.patch('/api/projects/:id', requireAuth, async (req, res) => {
       res.status(400).json({ error: 'پورت نامعتبر است.' });
       return;
     }
-    const domain = body.domain !== undefined ? String(body.domain).trim() : existing.domain;
+    const domain = body.domain !== undefined ? String(body.domain).trim().toLowerCase() : existing.domain;
     if (domain && !validateDomainString(domain)) {
       res.status(400).json({ error: 'فرمت دامنه نامعتبر است.' });
       return;
     }
     const caddyEnabled =
       body.caddyEnabled !== undefined ? (body.caddyEnabled ? 1 : 0) : existing.caddy_enabled;
+    if (domain && caddyEnabled === 1) {
+      const domainConflict = db
+        .prepare('SELECT name FROM projects WHERE LOWER(domain) = ? AND caddy_enabled = 1 AND id != ?')
+        .get(domain, id) as { name: string } | undefined;
+      if (domainConflict) {
+        res.status(409).json({
+          error: `دامنه «${domain}» قبلاً به پروژه «${domainConflict.name}» متصل شده است.`,
+        });
+        return;
+      }
+    }
     const caddyExtraDirectives =
       body.caddyExtraDirectives !== undefined
         ? String(body.caddyExtraDirectives)
