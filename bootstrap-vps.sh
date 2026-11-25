@@ -275,9 +275,7 @@ if [ ! -f "${INSTALL_DIR}/caddy/Caddyfile" ]; then
     printf '}\n\n'
 
     printf '%s {\n' "$STATUS_FQDN"
-    printf '  basic_auth {\n'
-    printf '    %s %s\n' "$BASIC_AUTH_USER" "$BASIC_AUTH_HASH"
-    printf '  }\n'
+    printf '  # Beszel uses PocketBase Authorization header internally; rely on Beszel built-in login\n'
     printf '  reverse_proxy beszel:8090\n'
     printf '}\n\n'
 
