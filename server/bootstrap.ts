@@ -3,6 +3,7 @@ export interface BootstrapOptions {
   caddyEmail: string;
   dockerNetwork: string;
   panelPort: number;
+  basicAuthUser?: string;
   includeBeszel: boolean;
   configureUfw: boolean;
   panelRepoOrImage: string;
@@ -13,12 +14,13 @@ export function generateBootstrapScript(opts: BootstrapOptions): string {
   const safeEmail = opts.caddyEmail.trim() || 'admin@example.com';
   const safeNet = opts.dockerNetwork.trim() || 'caddy_net';
   const safePort = Number(opts.panelPort) || 3000;
+  const safeUser = (opts.basicAuthUser || 'admin').replace(/[^a-zA-Z0-9._-]/g, '') || 'admin';
 
   return `#!/usr/bin/env bash
 set -euo pipefail
 
 # ==============================================================================
-# اسکریپت راه‌اندازی کامل سرور VPS از صفر (سکان‌یار CI/CD + Docker + Caddy)
+# اسکریپت راه‌اندازی کامل سرور VPS از صفر (سکان‌یار + Docker + Caddy Basic Auth)
 # سیستم‌عامل پیشنهادی: Ubuntu 22.04 / 24.04 یا Debian 12
 # اجرا داخل پوشه کلون‌شده مخزن: sudo bash bootstrap-vps.sh
 # ==============================================================================
@@ -28,7 +30,18 @@ PANEL_DOMAIN="\${PANEL_DOMAIN:-${safeDomain}}"
 CADDY_EMAIL="\${CADDY_EMAIL:-${safeEmail}}"
 DOCKER_NET="\${DOCKER_NET:-${safeNet}}"
 PANEL_PORT="\${PANEL_PORT:-${safePort}}"
+BASIC_AUTH_USER="\${BASIC_AUTH_USER:-${safeUser}}"
 INCLUDE_BESZEL="\${INCLUDE_BESZEL:-${opts.includeBeszel ? 'true' : 'false'}}"
+
+GENERATED_PASS="false"
+if [ -z "\${BASIC_AUTH_PASS:-}" ] && [ -t 0 ]; then
+  read -r -s -p "رمز عبور Caddy Basic Auth (خالی = رمز تصادفی): " BASIC_AUTH_PASS
+  echo ""
+fi
+if [ -z "\${BASIC_AUTH_PASS:-}" ]; then
+  BASIC_AUTH_PASS="\$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16)"
+  GENERATED_PASS="true"
+fi
 
 echo "[1/6] به‌روزرسانی بسته‌های پایه سیستم..."
 sudo apt-get update -y
@@ -55,12 +68,12 @@ sudo ufw --force enable`
 
 echo "[4/6] ساخت پوشه‌های ماندگار و شبکه مشترک داکر (\${DOCKER_NET})..."
 mkdir -p "\${INSTALL_DIR}/data/workspaces" "\${INSTALL_DIR}/caddy"
-docker network inspect "\${DOCKER_NET}" >/dev/null 2>&1 || docker network create "\${DOCKER_NET}"
+sudo docker network inspect "\${DOCKER_NET}" >/dev/null 2>&1 || sudo docker network create "\${DOCKER_NET}"
 
-echo "[5/6] تولید کلیدهای امنیتی یکتا در فایل .env..."
+echo "[5/6] تولید کلیدهای امنیتی (.env) و Caddyfile با Basic Auth (لایه اول امنیت)..."
 if [ ! -f "\${INSTALL_DIR}/.env" ]; then
-  SESSION_SECRET=\$(openssl rand -hex 32)
-  DATA_ENCRYPTION_KEY=\$(openssl rand -hex 32)
+  SESSION_SECRET="\$(openssl rand -hex 32)"
+  DATA_ENCRYPTION_KEY="\$(openssl rand -hex 32)"
   cat <<EOF > "\${INSTALL_DIR}/.env"
 NODE_ENV=production
 PORT=\${PANEL_PORT}
@@ -75,35 +88,35 @@ EOF
 fi
 
 if [ ! -f "\${INSTALL_DIR}/caddy/Caddyfile" ]; then
-  cat <<EOF > "\${INSTALL_DIR}/caddy/Caddyfile"
-{
-  email \${CADDY_EMAIL}
-  admin 0.0.0.0:2019
-}
-
-\${PANEL_DOMAIN} {
-  encode zstd gzip
-  reverse_proxy sokanyar-panel:\${PANEL_PORT}
-}
-
-# BEGIN MANAGED ROUTES
-# مسیرهای پروژه‌ها توسط پنل در اینجا مدیریت می‌شوند
-# END MANAGED ROUTES
-EOF
+  BASIC_AUTH_HASH="\$(sudo docker run --rm caddy:2-alpine caddy hash-password --plaintext "\${BASIC_AUTH_PASS}")"
+  {
+    printf '{\\n  email %s\\n  admin 0.0.0.0:2019\\n}\\n\\n' "\${CADDY_EMAIL}"
+    printf '%s {\\n  encode zstd gzip\\n\\n' "\${PANEL_DOMAIN}"
+    printf '  handle /api/webhooks/* {\\n    reverse_proxy sokanyar-panel:%s\\n  }\\n\\n' "\${PANEL_PORT}"
+    printf '  handle {\\n    basic_auth {\\n      %s %s\\n    }\\n' "\${BASIC_AUTH_USER}" "\${BASIC_AUTH_HASH}"
+    printf '    reverse_proxy sokanyar-panel:%s {\\n' "\${PANEL_PORT}"
+    printf '      header_up X-Forwarded-User {http.auth.user.id}\\n'
+    printf '    }\\n  }\\n}\\n\\n'
+    printf '# BEGIN MANAGED ROUTES\\n# مسیرهای پروژه‌ها توسط پنل در اینجا مدیریت می‌شوند\\n# END MANAGED ROUTES\\n'
+  } > "\${INSTALL_DIR}/caddy/Caddyfile"
 fi
 
 echo "[6/6] ساخت ایمیج و اجرای استک در \${INSTALL_DIR}..."
 cd "\${INSTALL_DIR}"
 if [ "\${INCLUDE_BESZEL}" = "true" ]; then
-  docker compose --profile beszel up -d --build
+  sudo docker compose --profile beszel up -d --build
 else
-  docker compose up -d --build
+  sudo docker compose up -d --build
 fi
 
 echo "=================================================================="
-echo "راه‌اندازی با موفقیت انجام شد!"
+echo "راه‌اندازی با موفقیت انجام شد (احراز هویت دو لایه فعال است)."
 echo "آدرس پنل: \${PANEL_DOMAIN}"
-echo "نکته: Portainer در این چیدمان نصب نشده تا رم سرور صرفه‌جویی شود."
+echo "لایه ۱ - نام کاربری Basic Auth: \${BASIC_AUTH_USER}"
+if [ "\${GENERATED_PASS}" = "true" ]; then
+  echo "لایه ۱ - رمز عبور تولیدشده: \${BASIC_AUTH_PASS}"
+fi
+echo "لایه ۲ - پس از عبور از Basic Auth، رمز مدیر پنل را تنظیم و وارد شوید."
 echo "=================================================================="
 `;
 }
@@ -135,7 +148,7 @@ export function generatePanelComposeYaml(opts: BootstrapOptions): string {
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      LISTEN: 45876`
+      LISTEN: "45876"`
     : '';
 
   return `services:

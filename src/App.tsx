@@ -177,6 +177,11 @@ export default function App() {
                 ? 'VPS عملیاتی (Docker متصل)'
                 : 'پیش‌نمایش وب (بدون داکر)'}
             </div>
+            {authStatus.caddyUser && (
+              <div className="text-[11px] text-emerald-400 pt-1">
+                Caddy Basic Auth ({authStatus.caddyUser})
+              </div>
+            )}
           </div>
 
           <button
@@ -185,7 +190,7 @@ export default function App() {
             className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-[#1F2937] text-slate-400 hover:text-slate-200 hover:border-slate-600 transition-colors cursor-pointer whitespace-nowrap"
           >
             <LogOut className="w-3.5 h-3.5" />
-            <span>خروج از نشست</span>
+            <span>خروج از نشست مدیر</span>
           </button>
         </div>
       </aside>

@@ -9,6 +9,7 @@ interface ProvisioningPageProps {
 export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
   const [panelDomain, setPanelDomain] = useState('panel.example.com');
   const [caddyEmail, setCaddyEmail] = useState('admin@example.com');
+  const [basicAuthUser, setBasicAuthUser] = useState('admin');
   const [dockerNetwork, setDockerNetwork] = useState('caddy_net');
   const [panelPort, setPanelPort] = useState(3000);
   const [includeBeszel, setIncludeBeszel] = useState(true);
@@ -38,6 +39,7 @@ export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
         body: JSON.stringify({
           panelDomain,
           caddyEmail,
+          basicAuthUser,
           dockerNetwork,
           panelPort,
           includeBeszel,
@@ -48,7 +50,7 @@ export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
     } catch {
       // Ignore transient validation error while typing
     }
-  }, [panelDomain, caddyEmail, dockerNetwork, panelPort, includeBeszel, configureUfw]);
+  }, [panelDomain, caddyEmail, basicAuthUser, dockerNetwork, panelPort, includeBeszel, configureUfw]);
 
   useEffect(() => {
     void generateBundle();
@@ -185,6 +187,16 @@ export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
               type="email"
               value={caddyEmail}
               onChange={(e) => setCaddyEmail(e.target.value)}
+              className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-sky-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-slate-300 mb-1">نام کاربری Caddy Basic Auth</label>
+            <input
+              type="text"
+              value={basicAuthUser}
+              onChange={(e) => setBasicAuthUser(e.target.value)}
               className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-sky-500"
             />
           </div>

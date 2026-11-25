@@ -167,6 +167,18 @@ function serializeProject(p: ProjectRow) {
   };
 }
 
+function extractPanelToken(req: Request): string {
+  const customHeader = req.header('x-panel-token')?.trim();
+  if (customHeader) {
+    return customHeader;
+  }
+  const authHeader = req.header('authorization') ?? '';
+  if (authHeader.startsWith('Bearer ')) {
+    return authHeader.slice('Bearer '.length).trim();
+  }
+  return '';
+}
+
 function getAuthState() {
   const envPasscode = process.env.PANEL_ADMIN_PASSCODE?.trim() ?? '';
   const claimedHash = getSetting('admin_password_hash');
@@ -177,12 +189,11 @@ function getAuthState() {
 }
 
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  const authHeader = req.header('authorization') ?? '';
-  if (!authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'احراز هویت الزامی است.' });
+  const token = extractPanelToken(req);
+  if (!token) {
+    res.status(401).json({ error: 'احراز هویت مدیر الزامی است.' });
     return;
   }
-  const token = authHeader.slice('Bearer '.length).trim();
   const payload = verifySessionToken(token);
   if (!payload) {
     res.status(401).json({ error: 'نشست کاربری منقضی شده یا نامعتبر است.' });
@@ -198,12 +209,15 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/auth/status', (req, res) => {
   const { envPasscodeActive, needsSetup } = getAuthState();
-  const authHeader = req.header('authorization') ?? '';
-  let authenticated = false;
-  if (authHeader.startsWith('Bearer ')) {
-    authenticated = Boolean(verifySessionToken(authHeader.slice('Bearer '.length).trim()));
-  }
-  res.json({ authenticated, needsSetup, envPasscodeActive });
+  const token = extractPanelToken(req);
+  const authenticated = token ? Boolean(verifySessionToken(token)) : false;
+  const caddyUser = (req.header('x-forwarded-user') ?? '').trim();
+  res.json({
+    authenticated,
+    needsSetup,
+    envPasscodeActive,
+    caddyUser: caddyUser || undefined,
+  });
 });
 
 app.post('/api/auth/setup', (req, res) => {
@@ -804,6 +818,7 @@ app.post('/api/provisioning/generate', requireAuth, (req, res) => {
     caddyEmail: String(body.caddyEmail || 'admin@example.com'),
     dockerNetwork: String(body.dockerNetwork || 'caddy_net').replace(/[^a-zA-Z0-9_-]/g, '') || 'caddy_net',
     panelPort: Math.max(1024, Math.min(65535, Number(body.panelPort || 3000))),
+    basicAuthUser: String(body.basicAuthUser || 'admin'),
     includeBeszel: Boolean(body.includeBeszel),
     configureUfw: body.configureUfw !== false,
     panelRepoOrImage: String(body.panelRepoOrImage || 'sokanyar-panel:latest'),

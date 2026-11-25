@@ -11,13 +11,13 @@ export function getAuthToken(): string | null {
 export async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (inMemoryToken) {
-    headers.set('Authorization', `Bearer ${inMemoryToken}`);
+    headers.set('X-Panel-Token', inMemoryToken);
   }
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const res = await fetch(url, { ...init, headers });
+  const res = await fetch(url, { ...init, credentials: 'same-origin', headers });
   if (res.status === 401 && inMemoryToken) {
     inMemoryToken = null;
   }
@@ -56,9 +56,10 @@ export function streamDeploymentLogs(
     try {
       const headers = new Headers();
       if (inMemoryToken) {
-        headers.set('Authorization', `Bearer ${inMemoryToken}`);
+        headers.set('X-Panel-Token', inMemoryToken);
       }
       const res = await fetch(`/api/deployments/${encodeURIComponent(deploymentId)}/stream`, {
+        credentials: 'same-origin',
         headers,
         signal: controller.signal,
       });

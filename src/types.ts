@@ -2,6 +2,7 @@ export interface AuthStatus {
   authenticated: boolean;
   needsSetup: boolean;
   envPasscodeActive: boolean;
+  caddyUser?: string;
 }
 
 export interface HostMetrics {
