@@ -18,7 +18,7 @@ export function CaddyPage() {
   } | null>(null);
 
   const [applying, setApplying] = useState(false);
-  const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'ok' | 'warn' | 'err'; text: string } | null>(null);
 
   const loadCaddy = useCallback(async () => {
     setLoading(true);
@@ -76,7 +76,7 @@ export function CaddyPage() {
       );
       setCommitNote('');
       setValidationStatus(null);
-      setFeedback({ type: 'ok', text: res.message });
+      setFeedback({ type: res.appliedToLiveCaddy ? 'ok' : 'warn', text: res.message });
       await loadCaddy();
     } catch (err) {
       setFeedback({
@@ -165,7 +165,13 @@ export function CaddyPage() {
               }
             >
               {caddyState?.caddyStatus.reachable
-                ? `متصل (${caddyState.caddyStatus.mode === 'admin_api' ? 'Admin API :2019' : 'Caddy CLI'})`
+                ? `متصل (${
+                    caddyState.caddyStatus.mode === 'admin_api'
+                      ? 'Admin API :2019'
+                      : caddyState.caddyStatus.mode === 'docker_exec'
+                        ? 'Docker Exec (caddy)'
+                        : 'Caddy CLI'
+                  })`
                 : 'آماده اعمال (روی VPS دارای Caddy به صورت زنده Reload می‌شود)'}
             </span>
           </p>
@@ -200,7 +206,9 @@ export function CaddyPage() {
           className={`rounded-xl px-4 py-3 text-xs border ${
             feedback.type === 'ok'
               ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-              : 'bg-red-500/10 border-red-500/20 text-red-400'
+              : feedback.type === 'warn'
+                ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+                : 'bg-red-500/10 border-red-500/20 text-red-400'
           }`}
         >
           {feedback.text}

@@ -63,7 +63,7 @@ export interface SystemStatus {
     dockerAvailable: boolean;
     gitAvailable: boolean;
     caddyReachable: boolean;
-    caddyMode: 'admin_api' | 'cli' | 'none';
+    caddyMode: 'admin_api' | 'docker_exec' | 'cli' | 'none';
   };
   counts: {
     projects: number;
@@ -179,7 +179,7 @@ export interface CaddyState {
   content: string;
   managedPreview: string;
   snapshots: CaddySnapshot[];
-  caddyStatus: { reachable: boolean; mode: 'admin_api' | 'cli' | 'none' };
+  caddyStatus: { reachable: boolean; mode: 'admin_api' | 'docker_exec' | 'cli' | 'none' };
   routes: CaddyRouteItem[];
 }
 

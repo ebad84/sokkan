@@ -36,7 +36,14 @@ export function getCaddyAdminUrl(): string | null {
   return 'http://127.0.0.1:2019';
 }
 
-export async function isCaddyAvailable(): Promise<{ reachable: boolean; mode: 'admin_api' | 'cli' | 'none' }> {
+export function getCaddyContainerName(): string {
+  const raw = process.env.CADDY_CONTAINER_NAME?.trim();
+  return raw && /^[a-zA-Z0-9_.-]+$/.test(raw) ? raw : 'caddy';
+}
+
+export type CaddyMode = 'admin_api' | 'docker_exec' | 'cli' | 'none';
+
+export async function isCaddyAvailable(): Promise<{ reachable: boolean; mode: CaddyMode }> {
   const adminUrl = getCaddyAdminUrl();
   if (adminUrl) {
     try {
@@ -48,8 +55,15 @@ export async function isCaddyAvailable(): Promise<{ reachable: boolean; mode: 'a
         return { reachable: true, mode: 'admin_api' };
       }
     } catch {
-      // Fallback to CLI check
+      // Fallback to Docker Exec / CLI check
     }
+  }
+  try {
+    const containerName = getCaddyContainerName();
+    await execFileAsync('docker', ['exec', containerName, 'caddy', 'version'], { timeout: 2500 });
+    return { reachable: true, mode: 'docker_exec' };
+  } catch {
+    // Fallback to local Caddy CLI check
   }
   try {
     await execFileAsync('caddy', ['version'], { timeout: 1500 });
@@ -133,9 +147,23 @@ export function checkCaddySyntaxLocally(content: string): { valid: boolean; erro
   return { valid: errors.length === 0, errors };
 }
 
+function formatExecError(err: unknown, fallback: string): string {
+  if (err && typeof err === 'object') {
+    const stderr = 'stderr' in err && typeof err.stderr === 'string' ? err.stderr.trim() : '';
+    const stdout = 'stdout' in err && typeof err.stdout === 'string' ? err.stdout.trim() : '';
+    if (stderr) return stderr;
+    if (stdout) return stdout;
+  }
+  return err instanceof Error ? err.message : fallback;
+}
+
 export async function validateCaddyfile(
   content: string,
-): Promise<{ valid: boolean; errors: string[]; validatedBy: 'caddy_api' | 'caddy_cli' | 'syntax_checker' }> {
+): Promise<{
+  valid: boolean;
+  errors: string[];
+  validatedBy: 'caddy_api' | 'caddy_docker' | 'caddy_cli' | 'syntax_checker';
+}> {
   const local = checkCaddySyntaxLocally(content);
   if (!local.valid) {
     return { valid: false, errors: local.errors, validatedBy: 'syntax_checker' };
@@ -166,6 +194,35 @@ export async function validateCaddyfile(
     }
   }
 
+  if (caddyStatus.reachable && caddyStatus.mode === 'docker_exec') {
+    const containerName = getCaddyContainerName();
+    const diskPath = getCaddyfileDiskPath();
+    if (diskPath && fs.existsSync(path.dirname(diskPath))) {
+      const tmpName = `.Caddyfile.validate.${Date.now()}.tmp`;
+      const hostTmpPath = path.join(path.dirname(diskPath), tmpName);
+      const containerTmpPath = path.posix.join('/etc/caddy', tmpName);
+      try {
+        fs.writeFileSync(hostTmpPath, content, 'utf8');
+        await execFileAsync(
+          'docker',
+          ['exec', containerName, 'caddy', 'validate', '--config', containerTmpPath, '--adapter', 'caddyfile'],
+          { timeout: 8000 },
+        );
+        return { valid: true, errors: [], validatedBy: 'caddy_docker' };
+      } catch (err) {
+        return {
+          valid: false,
+          errors: [formatExecError(err, 'خطا در اعتبارسنجی Caddyfile داخل کانتینر Caddy')],
+          validatedBy: 'caddy_docker',
+        };
+      } finally {
+        if (fs.existsSync(hostTmpPath)) {
+          fs.unlinkSync(hostTmpPath);
+        }
+      }
+    }
+  }
+
   if (caddyStatus.reachable && caddyStatus.mode === 'cli') {
     const tmpPath = path.join('/tmp', `caddy-validate-${Date.now()}.Caddyfile`);
     try {
@@ -175,8 +232,11 @@ export async function validateCaddyfile(
       });
       return { valid: true, errors: [], validatedBy: 'caddy_cli' };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'خطا در اعتبارسنجی Caddyfile';
-      return { valid: false, errors: [msg], validatedBy: 'caddy_cli' };
+      return {
+        valid: false,
+        errors: [formatExecError(err, 'خطا در اعتبارسنجی Caddyfile')],
+        validatedBy: 'caddy_cli',
+      };
     } finally {
       if (fs.existsSync(tmpPath)) {
         fs.unlinkSync(tmpPath);
@@ -231,6 +291,20 @@ export async function applyCaddyfile(
       }
       appliedToLiveCaddy = true;
     }
+  } else if (caddyStatus.reachable && caddyStatus.mode === 'docker_exec' && diskPath) {
+    const containerName = getCaddyContainerName();
+    try {
+      await execFileAsync(
+        'docker',
+        ['exec', containerName, 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile'],
+        { timeout: 10000 },
+      );
+      appliedToLiveCaddy = true;
+    } catch (err) {
+      fs.writeFileSync(diskPath, prevContent, 'utf8');
+      const msg = formatExecError(err, 'خطا در reload کردن کانتینر Caddy');
+      throw new Error(`خطا در اعمال Caddyfile روی کانتینر Caddy و بازگشت خودکار به نسخه قبلی: ${msg}`);
+    }
   } else if (caddyStatus.reachable && caddyStatus.mode === 'cli' && diskPath) {
     try {
       await execFileAsync('caddy', ['reload', '--config', diskPath, '--adapter', 'caddyfile'], {
@@ -239,7 +313,7 @@ export async function applyCaddyfile(
       appliedToLiveCaddy = true;
     } catch (err) {
       fs.writeFileSync(diskPath, prevContent, 'utf8');
-      const msg = err instanceof Error ? err.message : 'خطا در reload کردن Caddy';
+      const msg = formatExecError(err, 'خطا در reload کردن Caddy');
       throw new Error(`خطا در اعمال Caddyfile و بازگشت خودکار به نسخه قبلی: ${msg}`);
     }
   }
@@ -257,7 +331,7 @@ export async function applyCaddyfile(
     snapshotId,
     message: appliedToLiveCaddy
       ? 'تغییرات روی Caddy زنده سرور با موفقیت اعمال و Reload شد.'
-      : 'تنظیمات اعتبارسنجی و ذخیره شد (در سرور دارای Caddy به صورت خودکار اعمال می‌شود).',
+      : 'تنظیمات فقط در فایل و دیتابیس ذخیره شد (اتصال به Caddy زنده برقرار نبود — روی سرور با docker exec caddy caddy reload اعمال کنید).',
   };
 }
 
