@@ -1,0 +1,6 @@
+{
+  "name": "سکان‌یار | پنل اتوماتیک CI/CD و مدیریت VPS",
+  "description": "پنل خودمیزبان برای اتصال مخازن گیتهاب، بیلد و دیپلوی خودکار با Docker، مدیریت زنده Caddyfile و راه‌اندازی سرور VPS از صفر.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
