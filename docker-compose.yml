@@ -14,9 +14,9 @@ services:
       - caddy_config:/config
     networks: [web]
 
-  sokanyar-panel:
+  sokkan-panel:
     build: .
-    container_name: sokanyar-panel
+    container_name: sokkan-panel
     restart: unless-stopped
     mem_limit: 300m
     env_file:

@@ -92,7 +92,7 @@ export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
       const data = await apiFetch<Record<string, unknown>>('/api/backup/export');
       const dateStr = new Date().toISOString().slice(0, 10);
       handleDownloadFile(
-        `sokanyar-backup-${dateStr}.json`,
+        `sokkan-backup-${dateStr}.json`,
         JSON.stringify(data, null, 2),
         'application/json',
       );

@@ -35,6 +35,28 @@ function toContainerSlug(value: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+function parseBulkEnvText(raw: string): Array<{ key: string; value: string }> {
+  const rows: Array<{ key: string; value: string }> = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let value = trimmed.slice(eqIdx + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      rows.push({ key, value });
+    }
+  }
+  return rows;
+}
+
 interface DeploymentDrawerProps {
   deploymentId: string | null;
   projects: Project[];
@@ -235,6 +257,10 @@ export function ProjectsPage({
   const [editExtraDirectives, setEditExtraDirectives] = useState('');
   const [editEnvKey, setEditEnvKey] = useState('');
   const [editEnvVal, setEditEnvVal] = useState('');
+  const [editBulkEnv, setEditBulkEnv] = useState('');
+  const [editDeletedEnvKeys, setEditDeletedEnvKeys] = useState<string[]>([]);
+  const [showBulkEnvAdd, setShowBulkEnvAdd] = useState(false);
+  const [bulkEnvAddText, setBulkEnvAddText] = useState('');
   const [editRotatedSecret, setEditRotatedSecret] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -393,6 +419,8 @@ export function ProjectsPage({
     setEditExtraDirectives(p.caddyExtraDirectives);
     setEditEnvKey('');
     setEditEnvVal('');
+    setEditBulkEnv('');
+    setEditDeletedEnvKeys([]);
     setEditRotatedSecret('');
   };
 
@@ -402,7 +430,13 @@ export function ProjectsPage({
     setSavingEdit(true);
     setActionError('');
     try {
-      const envUpdate: Record<string, string> = {};
+      const envUpdate: Record<string, string | null> = {};
+      for (const delKey of editDeletedEnvKeys) {
+        envUpdate[delKey] = null;
+      }
+      for (const row of parseBulkEnvText(editBulkEnv)) {
+        envUpdate[row.key] = row.value;
+      }
       if (editEnvKey.trim() && editEnvVal !== '') {
         envUpdate[editEnvKey.trim()] = editEnvVal;
       }
@@ -930,16 +964,55 @@ export function ProjectsPage({
 
               {/* Step 4: Env Vars */}
               <div className="pt-2 border-t border-[#1F2937] space-y-2.5">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-slate-300 font-medium">متغیرهای محیطی (.env)</span>
-                  <button
-                    type="button"
-                    onClick={() => setEnvRows((prev) => [...prev, { key: '', value: '' }])}
-                    className="text-sky-400 hover:text-sky-300 cursor-pointer"
-                  >
-                    + افزودن متغیر
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setShowBulkEnvAdd((v) => !v)}
+                      className="text-slate-400 hover:text-slate-200 cursor-pointer"
+                    >
+                      {showBulkEnvAdd ? 'بستن ورود یکجا' : 'چسباندن یکجای .env'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEnvRows((prev) => [...prev, { key: '', value: '' }])}
+                      className="text-sky-400 hover:text-sky-300 cursor-pointer"
+                    >
+                      + افزودن متغیر
+                    </button>
+                  </div>
                 </div>
+                {showBulkEnvAdd && (
+                  <div className="space-y-2">
+                    <textarea
+                      rows={4}
+                      value={bulkEnvAddText}
+                      onChange={(e) => setBulkEnvAddText(e.target.value)}
+                      placeholder={'DATABASE_URL=postgresql://...\nREDIS_URL=redis://...'}
+                      dir="ltr"
+                      className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg p-3 text-slate-100 font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const parsed = parseBulkEnvText(bulkEnvAddText);
+                        if (parsed.length > 0) {
+                          setEnvRows((prev) => {
+                            const map = new Map(prev.filter((r) => r.key.trim()).map((r) => [r.key.trim(), r.value]));
+                            for (const p of parsed) map.set(p.key, p.value);
+                            return Array.from(map.entries()).map(([key, value]) => ({ key, value }));
+                          });
+                          setBulkEnvAddText('');
+                          setShowBulkEnvAdd(false);
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-[#1F2937] hover:bg-slate-700 text-slate-100 rounded-lg cursor-pointer"
+                    >
+                      تبدیل به ردیف‌های .env
+                    </button>
+                  </div>
+                )}
                 {envRows.map((row, idx) => (
                   <div key={idx} className="flex gap-2">
                     <input
@@ -1112,13 +1185,39 @@ export function ProjectsPage({
                 </label>
               </div>
 
-              <div className="pt-2 border-t border-[#1F2937] space-y-2">
+              <div className="pt-2 border-t border-[#1F2937] space-y-2.5">
                 <div className="text-slate-300 font-medium">
-                  افزودن یا بروزرسانی متغیر محیطی (.env) — متغیرهای ثبت‌شده:{' '}
-                  <span className="font-mono text-slate-400">
-                    {editingProject.envKeys.join(', ') || 'ندارد'}
-                  </span>
+                  مدیریت متغیرهای محیطی (.env)
                 </div>
+                {editingProject.envKeys.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] font-mono">
+                    {editingProject.envKeys.map((k) => {
+                      const markedDelete = editDeletedEnvKeys.includes(k);
+                      return (
+                        <span
+                          key={k}
+                          className={`inline-flex items-center gap-1 ${
+                            markedDelete ? 'line-through text-red-400' : 'text-slate-300'
+                          }`}
+                        >
+                          <span>{k}</span>
+                          <button
+                            type="button"
+                            title={markedDelete ? 'لغو حذف' : 'حذف متغیر'}
+                            onClick={() =>
+                              setEditDeletedEnvKeys((prev) =>
+                                prev.includes(k) ? prev.filter((item) => item !== k) : [...prev, k],
+                              )
+                            }
+                            className="text-slate-500 hover:text-red-400 cursor-pointer"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -1135,6 +1234,14 @@ export function ProjectsPage({
                     className="flex-1 bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono"
                   />
                 </div>
+                <textarea
+                  rows={2}
+                  value={editBulkEnv}
+                  onChange={(e) => setEditBulkEnv(e.target.value)}
+                  placeholder="یا چند متغیر را یکجا وارد کنید: KEY=VALUE در هر خط"
+                  dir="ltr"
+                  className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg p-2.5 text-slate-100 font-mono text-[11px]"
+                />
               </div>
 
               <div className="pt-3 border-t border-[#1F2937] flex justify-end gap-3">

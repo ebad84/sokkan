@@ -90,6 +90,26 @@ db.exec(`
     disk_percent REAL NOT NULL,
     sampled_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS services (
+    id TEXT PRIMARY KEY,
+    template_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE NOT NULL,
+    image TEXT NOT NULL,
+    category TEXT NOT NULL,
+    container_port INTEGER NOT NULL,
+    domain TEXT NOT NULL DEFAULT '',
+    caddy_enabled INTEGER NOT NULL DEFAULT 0,
+    mem_limit_mb INTEGER NOT NULL DEFAULT 256,
+    env_vars_enc TEXT NOT NULL DEFAULT '',
+    volumes_json TEXT NOT NULL DEFAULT '[]',
+    command_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'idle',
+    last_message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
 `);
 
 export const DEFAULT_CADDYFILE = `{
@@ -98,7 +118,7 @@ export const DEFAULT_CADDYFILE = `{
 }
 
 # BEGIN MANAGED ROUTES
-# مسیرهای خودکار پروژه‌های سکان‌یار در این بخش قرار می‌گیرند
+# مسیرهای خودکار پروژه‌های سکان در این بخش قرار می‌گیرند
 # END MANAGED ROUTES
 `;
 
@@ -183,6 +203,26 @@ export interface CaddySnapshotRow {
   note: string;
   applied: number;
   created_at: string;
+}
+
+export interface ServiceRow {
+  id: string;
+  template_id: string;
+  name: string;
+  slug: string;
+  image: string;
+  category: string;
+  container_port: number;
+  domain: string;
+  caddy_enabled: number;
+  mem_limit_mb: number;
+  env_vars_enc: string;
+  volumes_json: string;
+  command_json: string;
+  status: string;
+  last_message: string;
+  created_at: string;
+  updated_at: string;
 }
 
 function loadInitialCaddyfile(): string {

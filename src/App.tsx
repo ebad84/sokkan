@@ -3,6 +3,7 @@ import {
   Box,
   GitBranch,
   Globe,
+  Layers,
   LogOut,
   Menu,
   Plus,
@@ -17,6 +18,8 @@ import { ContainersPage } from './components/ContainersPage';
 import { OverviewPage } from './components/OverviewPage';
 import { DeploymentDrawer, ProjectsPage } from './components/ProjectsPage';
 import { ProvisioningPage } from './components/ProvisioningPage';
+import { SokkanLogo } from './components/SokkanLogo';
+import { TemplatesPage } from './components/TemplatesPage';
 import type {
   AuthStatus,
   BeszelConfig,
@@ -29,6 +32,7 @@ import type {
 const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: 'نمای کلی سرور', icon: Activity },
   { id: 'projects', label: 'پروژه‌ها و CI/CD', icon: GitBranch },
+  { id: 'templates', label: 'سرویس‌های آماده', icon: Layers },
   { id: 'containers', label: 'کانتینرها و داکر', icon: Box },
   { id: 'caddy', label: 'مدیریت Caddy', icon: Globe },
   { id: 'provisioning', label: 'راه‌اندازی و بکاپ', icon: ServerCog },
@@ -133,21 +137,9 @@ export default function App() {
       <aside className="hidden lg:flex w-[260px] shrink-0 bg-[#111827] border-l border-[#1F2937] flex-col justify-between">
         <div>
           <div className="h-16 px-6 border-b border-[#1F2937] flex items-center gap-3">
-            <svg
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              aria-hidden="true"
-              className="text-sky-400 shrink-0"
-            >
-              <rect x="3" y="3" width="8" height="8" rx="2" stroke="currentColor" strokeWidth="1.8" />
-              <rect x="13" y="3" width="8" height="8" rx="2" stroke="currentColor" strokeWidth="1.8" />
-              <rect x="3" y="13" width="8" height="8" rx="2" stroke="currentColor" strokeWidth="1.8" />
-              <path d="M17 13v8M13 17h8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-            </svg>
+            <SokkanLogo size={32} />
             <span className="text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0">
-              سکان‌یار
+              سکان
             </span>
           </div>
 
@@ -210,7 +202,10 @@ export default function App() {
           <aside className="relative z-50 w-64 bg-[#111827] border-l border-[#1F2937] flex flex-col justify-between">
             <div>
               <div className="h-16 px-5 border-b border-[#1F2937] flex items-center justify-between">
-                <span className="text-base font-bold text-slate-100">سکان‌یار</span>
+                <div className="flex items-center gap-2.5">
+                  <SokkanLogo size={28} />
+                  <span className="text-base font-bold text-slate-100">سکان</span>
+                </div>
                 <button
                   type="button"
                   onClick={() => setMobileMenuOpen(false)}
@@ -312,6 +307,10 @@ export default function App() {
               onRefresh={loadDashboardData}
               onInspectDeployment={setInspectDeploymentId}
             />
+          )}
+
+          {activeTab === 'templates' && (
+            <TemplatesPage onServiceChanged={loadDashboardData} />
           )}
 
           {activeTab === 'containers' && <ContainersPage onNavigate={setActiveTab} />}

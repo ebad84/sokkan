@@ -9,6 +9,7 @@ import {
   setSetting,
   type CaddySnapshotRow,
   type ProjectRow,
+  type ServiceRow,
 } from './db.ts';
 
 const execFileAsync = promisify(execFile);
@@ -80,15 +81,20 @@ export function validateDomainString(domain: string): boolean {
   return /^[a-zA-Z0-9.*:_-]+$/.test(trimmed) && !trimmed.includes('..');
 }
 
-export function renderManagedRoutesBlock(projects: ProjectRow[]): string {
-  const active = projects.filter((p) => p.caddy_enabled === 1 && p.domain.trim().length > 0);
-  if (active.length === 0) {
-    return `${BEGIN_MARKER}\n# هنوز دامنه‌ای برای پروژه‌ها فعال نشده است\n${END_MARKER}`;
+export function renderManagedRoutesBlock(
+  projects: ProjectRow[],
+  services: ServiceRow[] = [],
+): string {
+  const activeProjects = projects.filter((p) => p.caddy_enabled === 1 && p.domain.trim().length > 0);
+  const activeServices = services.filter((s) => s.caddy_enabled === 1 && s.domain.trim().length > 0);
+
+  if (activeProjects.length === 0 && activeServices.length === 0) {
+    return `${BEGIN_MARKER}\n# هنوز دامنه‌ای برای پروژه‌ها یا سرویس‌ها فعال نشده است\n${END_MARKER}`;
   }
 
-  const blocks = active.map((p) => {
+  const projectBlocks = activeProjects.map((p) => {
     const safeDomain = p.domain.trim();
-    const upstream = `sokanyar-${p.slug}:${p.container_port}`;
+    const upstream = `sokkan-${p.slug}:${p.container_port}`;
     const extraLines = p.caddy_extra_directives
       .split('\n')
       .map((l) => l.trim())
@@ -102,12 +108,25 @@ export function renderManagedRoutesBlock(projects: ProjectRow[]): string {
 }`;
   });
 
-  return `${BEGIN_MARKER}\n${blocks.join('\n\n')}\n${END_MARKER}`;
+  const serviceBlocks = activeServices.map((s) => {
+    const safeDomain = s.domain.trim();
+    const upstream = `sokkan-${s.slug}:${s.container_port}`;
+    return `${safeDomain} {
+  encode zstd gzip
+  reverse_proxy ${upstream}
+}`;
+  });
+
+  return `${BEGIN_MARKER}\n${[...projectBlocks, ...serviceBlocks].join('\n\n')}\n${END_MARKER}`;
 }
 
-export function mergeManagedRoutesIntoCaddyfile(existingContent: string, projects: ProjectRow[]): string {
+export function mergeManagedRoutesIntoCaddyfile(
+  existingContent: string,
+  projects: ProjectRow[],
+  services: ServiceRow[] = [],
+): string {
   const base = existingContent?.trim() ? existingContent : DEFAULT_CADDYFILE;
-  const managedBlock = renderManagedRoutesBlock(projects);
+  const managedBlock = renderManagedRoutesBlock(projects, services);
 
   const beginIdx = base.indexOf(BEGIN_MARKER);
   const endIdx = base.indexOf(END_MARKER);
@@ -337,8 +356,9 @@ export async function applyCaddyfile(
 
 export async function syncProjectsToCaddyfile(note = 'همگام‌سازی خودکار مسیرهای پروژه'): Promise<void> {
   const projects = db.prepare('SELECT * FROM projects ORDER BY created_at ASC').all() as ProjectRow[];
+  const services = db.prepare('SELECT * FROM services ORDER BY created_at ASC').all() as ServiceRow[];
   const current = getSetting('caddyfile_content') ?? DEFAULT_CADDYFILE;
-  const next = mergeManagedRoutesIntoCaddyfile(current, projects);
+  const next = mergeManagedRoutesIntoCaddyfile(current, projects, services);
   if (next !== current) {
     await applyCaddyfile(next, note);
   }

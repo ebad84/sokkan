@@ -67,6 +67,7 @@ export interface SystemStatus {
   };
   counts: {
     projects: number;
+    services?: number;
     deployments: number;
   };
   hostMetrics: HostMetrics;
@@ -158,6 +159,7 @@ export interface DockerContainer {
 
 export interface CaddyRouteItem {
   projectId: string;
+  sourceType?: 'project' | 'service';
   name: string;
   slug: string;
   domain: string;
@@ -165,6 +167,60 @@ export interface CaddyRouteItem {
   containerPort: number;
   caddyEnabled: boolean;
   caddyExtraDirectives: string;
+}
+
+export interface DockerDiskCategory {
+  type: string;
+  totalCount: string;
+  active: string;
+  size: string;
+  reclaimable: string;
+}
+
+export interface TemplateEnvField {
+  key: string;
+  label: string;
+  defaultValue?: string;
+  autoGenerate?: 'password' | 'hex32';
+  secret?: boolean;
+  required?: boolean;
+  placeholder?: string;
+}
+
+export interface ServiceTemplate {
+  id: string;
+  name: string;
+  subtitle: string;
+  description: string;
+  category: 'database' | 'app' | 'tool';
+  image: string;
+  defaultSlug: string;
+  containerPort: number;
+  supportsDomain: boolean;
+  defaultMemLimitMb: number;
+  volumes: Array<{ name: string; mountPath: string }>;
+  envFields: TemplateEnvField[];
+}
+
+export interface DeployedService {
+  id: string;
+  templateId: string;
+  name: string;
+  slug: string;
+  containerName: string;
+  image: string;
+  category: 'database' | 'app' | 'tool';
+  containerPort: number;
+  domain: string;
+  caddyEnabled: boolean;
+  memLimitMb: number;
+  envKeys: string[];
+  internalHost: string;
+  connectionUrl: string;
+  status: string;
+  lastMessage: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface CaddySnapshot {
@@ -190,4 +246,4 @@ export interface BeszelConfig {
   hasPassword: boolean;
 }
 
-export type NavTab = 'overview' | 'projects' | 'containers' | 'caddy' | 'provisioning';
+export type NavTab = 'overview' | 'projects' | 'templates' | 'containers' | 'caddy' | 'provisioning';

@@ -188,7 +188,8 @@ export async function listDockerContainers(): Promise<DockerContainerSummary[]> 
       createdAt: c.Created ? new Date(c.Created * 1000).toISOString() : '',
       ports: Array.from(new Set(ports)),
       networks,
-      managedByPanel: c.Labels?.['sokanyar.managed'] === 'true',
+      managedByPanel:
+        c.Labels?.['sokkan.managed'] === 'true' || c.Labels?.['sokanyar.managed'] === 'true',
     };
   });
 }
@@ -402,3 +403,59 @@ export async function getSystemHostMetrics(): Promise<HostMetrics> {
     sampledAt: new Date().toISOString(),
   };
 }
+
+export interface DockerDiskCategory {
+  type: string;
+  totalCount: string;
+  active: string;
+  size: string;
+  reclaimable: string;
+}
+
+export async function getDockerDiskUsage(): Promise<DockerDiskCategory[]> {
+  try {
+    const { stdout } = await execFileAsync('docker', ['system', 'df', '--format', '{{json .}}'], {
+      timeout: 8000,
+    });
+    const rows: DockerDiskCategory[] = [];
+    for (const line of stdout.trim().split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as {
+          Type?: string;
+          TotalCount?: string;
+          Active?: string;
+          Size?: string;
+          Reclaimable?: string;
+        };
+        rows.push({
+          type: parsed.Type ?? '',
+          totalCount: parsed.TotalCount ?? '0',
+          active: parsed.Active ?? '0',
+          size: parsed.Size ?? '0B',
+          reclaimable: parsed.Reclaimable ?? '0B',
+        });
+      } catch {
+        // Ignore malformed line
+      }
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+export async function pruneDockerUnused(): Promise<{ reclaimedSummary: string }> {
+  const imgOut = await execFileAsync('docker', ['image', 'prune', '-f'], { timeout: 60_000 });
+  const buildOut = await execFileAsync('docker', ['builder', 'prune', '-f'], { timeout: 60_000 }).catch(
+    () => ({ stdout: '' }),
+  );
+  const lines = [imgOut.stdout, buildOut.stdout]
+    .join('\n')
+    .split('\n')
+    .filter((l) => l.toLowerCase().includes('reclaimed'));
+  return {
+    reclaimedSummary: lines.join(' | ').trim() || 'پاک‌سازی ایمیج‌ها و کش بیلد بلااستفاده انجام شد.',
+  };
+}
+

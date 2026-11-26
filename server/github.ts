@@ -35,7 +35,7 @@ export function validateBranchName(branch: string): string {
 function githubHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
-    'User-Agent': 'SokanYar-CICD-Panel',
+    'User-Agent': 'Sokkan-PaaS',
     'X-GitHub-Api-Version': '2022-11-28',
   };
   if (token?.trim()) {

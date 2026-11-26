@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# =====================================================================
+# sokkan — CLI manager for Sokkan PaaS (Docker + Caddy + CI/CD)
+# Installed to /usr/local/bin/sokkan by bootstrap-vps.sh
+# =====================================================================
+set -euo pipefail
+
+VERSION="1.0.0"
+
+resolve_install_dir() {
+  if [ -n "${SOKKAN_DIR:-}" ] && [ -f "${SOKKAN_DIR}/docker-compose.yml" ]; then
+    echo "$SOKKAN_DIR"
+    return
+  fi
+  local script_path
+  script_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+  local candidate
+  candidate="$(cd "$(dirname "$script_path")/.." && pwd)"
+  if [ -f "${candidate}/docker-compose.yml" ]; then
+    echo "$candidate"
+    return
+  fi
+  for dir in /opt/sokkan /opt/sokanyar "$PWD"; do
+    if [ -f "${dir}/docker-compose.yml" ]; then
+      echo "$dir"
+      return
+    fi
+  done
+  echo "Error: Could not locate Sokkan installation directory (docker-compose.yml not found)." >&2
+  echo "Set SOKKAN_DIR=/path/to/sokkan and try again." >&2
+  exit 1
+}
+
+run_docker() {
+  if docker info >/dev/null 2>&1; then
+    docker "$@"
+  else
+    sudo docker "$@"
+  fi
+}
+
+print_help() {
+  cat <<'EOF'
+Sokkan CLI — Lightweight Self-Hosted PaaS Manager
+
+Usage:
+  sokkan <command> [arguments]
+
+Commands:
+  status                    Show running containers and host resources
+  logs [service] [lines]    Stream container logs (default: sokkan-panel, 80 lines)
+  update                    Pull latest code from Git and rebuild sokkan-panel
+  restart [service]         Restart a service or the entire stack
+  reload-caddy              Validate and live-reload Caddyfile inside Caddy container
+  prune                     Safely prune dangling Docker images and build cache
+  hash-password [pass]      Generate bcrypt password hash for Caddy basic_auth
+  enable-agent              Configure and start the Beszel monitoring agent
+  backup [file.tar.gz]      Backup .env, caddy/Caddyfile, and data/panel.db
+  doctor                    Check Docker, web network, Caddy, Swap, and disk health
+  version                   Print Sokkan CLI version
+  help                      Show this help message
+EOF
+}
+
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  help|-h|--help)
+    print_help
+    exit 0
+    ;;
+  version|-v|--version)
+    echo "sokkan v${VERSION}"
+    exit 0
+    ;;
+esac
+
+INSTALL_DIR="$(resolve_install_dir)"
+cd "$INSTALL_DIR"
+
+case "$CMD" in
+  status)
+    echo "=== Sokkan Stack (${INSTALL_DIR}) ==="
+    run_docker compose ps
+    echo ""
+    echo "=== Host Resources ==="
+    free -h
+    echo ""
+    df -h /
+    ;;
+
+  logs)
+    SERVICE="${1:-sokkan-panel}"
+    LINES="${2:-80}"
+    run_docker compose logs -f --tail "$LINES" "$SERVICE"
+    ;;
+
+  update)
+    echo "[+] Pulling latest Sokkan changes in ${INSTALL_DIR}..."
+    git pull --ff-only
+    echo "[+] Rebuilding and restarting sokkan-panel..."
+    run_docker compose up -d --build sokkan-panel
+    echo "[+] Refreshing sokkan CLI symlink..."
+    chmod +x "${INSTALL_DIR}/bin/sokkan"
+    sudo ln -sf "${INSTALL_DIR}/bin/sokkan" /usr/local/bin/sokkan 2>/dev/null || true
+    echo "[+] Done! Checking health..."
+    sleep 2
+    curl -fsS "http://127.0.0.1:${PORT:-3000}/api/health" && echo "" || true
+    ;;
+
+  restart)
+    SERVICE="${1:-}"
+    if [ -n "$SERVICE" ]; then
+      run_docker compose restart "$SERVICE"
+    else
+      run_docker compose restart
+    fi
+    ;;
+
+  reload-caddy)
+    echo "[+] Validating /etc/caddy/Caddyfile..."
+    run_docker exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    echo "[+] Reloading Caddy..."
+    run_docker exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+    echo "[+] Caddy reloaded successfully."
+    ;;
+
+  prune)
+    echo "[+] Pruning unused Docker images and build cache (volumes & active containers preserved)..."
+    run_docker image prune -f
+    run_docker builder prune -f
+    run_docker system df
+    ;;
+
+  hash-password)
+    PASS="${1:-}"
+    if [ -z "$PASS" ]; then
+      read -rsp "Enter password to hash: " PASS
+      echo ""
+    fi
+    [ -n "$PASS" ] || { echo "Error: Empty password." >&2; exit 1; }
+    run_docker run --rm caddy:2 caddy hash-password --plaintext "$PASS"
+    ;;
+
+  enable-agent)
+    if [ -x "${INSTALL_DIR}/enable-agent.sh" ]; then
+      exec "${INSTALL_DIR}/enable-agent.sh"
+    else
+      echo "Error: ${INSTALL_DIR}/enable-agent.sh not found." >&2
+      exit 1
+    fi
+    ;;
+
+  backup)
+    OUT="${1:-${INSTALL_DIR}/sokkan-backup-$(date +%Y%m%d-%H%M%S).tar.gz}"
+    echo "[+] Creating backup archive: ${OUT}"
+    tar -czf "$OUT" -C "$INSTALL_DIR" .env caddy data/panel.db 2>/dev/null || \
+      tar -czf "$OUT" -C "$INSTALL_DIR" .env caddy data
+    chmod 600 "$OUT"
+    echo "[+] Backup saved to ${OUT}"
+    ;;
+
+  doctor)
+    echo "=== Sokkan Doctor ==="
+    echo "Install dir: ${INSTALL_DIR}"
+    printf "Docker daemon: "
+    run_docker info >/dev/null 2>&1 && echo "OK" || echo "FAIL"
+    printf "Network 'web': "
+    run_docker network inspect web >/dev/null 2>&1 && echo "OK" || echo "MISSING"
+    printf "Caddyfile valid: "
+    run_docker exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 && echo "OK" || echo "FAIL"
+    printf "Panel health: "
+    curl -fsS "http://127.0.0.1:${PORT:-3000}/api/health" >/dev/null 2>&1 && echo "OK" || echo "UNREACHABLE"
+    printf "Swap active: "
+    swapon --show | grep -q / && echo "OK" || echo "NONE"
+    ;;
+
+  *)
+    echo "Unknown command: ${CMD}" >&2
+    echo ""
+    print_help
+    exit 1
+    ;;
+esac

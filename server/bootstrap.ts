@@ -12,7 +12,7 @@ export interface BootstrapOptions {
 export function generateBootstrapScript(opts: BootstrapOptions): string {
   const safeDomain = opts.panelDomain.trim() || ':80';
   const safeEmail = opts.caddyEmail.trim() || 'admin@example.com';
-  const safeNet = opts.dockerNetwork.trim() || 'caddy_net';
+  const safeNet = opts.dockerNetwork.trim() || 'web';
   const safePort = Number(opts.panelPort) || 3000;
   const safeUser = (opts.basicAuthUser || 'admin').replace(/[^a-zA-Z0-9._-]/g, '') || 'admin';
 
@@ -20,9 +20,9 @@ export function generateBootstrapScript(opts: BootstrapOptions): string {
 set -euo pipefail
 
 # ==============================================================================
-# اسکریپت راه‌اندازی کامل سرور VPS از صفر (سکان‌یار + Docker + Caddy Basic Auth)
-# سیستم‌عامل پیشنهادی: Ubuntu 22.04 / 24.04 یا Debian 12
-# اجرا داخل پوشه کلون‌شده مخزن: sudo bash bootstrap-vps.sh
+# Sokkan PaaS — Automated VPS Setup Script (Docker + Caddy Basic Auth + CLI)
+# Recommended OS: Ubuntu 24.04 / 26.04 or Debian 12
+# Run inside cloned repository: sudo bash bootstrap-vps.sh
 # ==============================================================================
 
 INSTALL_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +35,7 @@ INCLUDE_BESZEL="\${INCLUDE_BESZEL:-${opts.includeBeszel ? 'true' : 'false'}}"
 
 GENERATED_PASS="false"
 if [ -z "\${BASIC_AUTH_PASS:-}" ] && [ -t 0 ]; then
-  read -r -s -p "رمز عبور Caddy Basic Auth (خالی = رمز تصادفی): " BASIC_AUTH_PASS
+  read -r -s -p "Caddy Basic Auth password (leave empty to auto-generate): " BASIC_AUTH_PASS
   echo ""
 fi
 if [ -z "\${BASIC_AUTH_PASS:-}" ]; then
@@ -43,11 +43,11 @@ if [ -z "\${BASIC_AUTH_PASS:-}" ]; then
   GENERATED_PASS="true"
 fi
 
-echo "[1/6] به‌روزرسانی بسته‌های پایه سیستم..."
+echo "[1/6] Updating base system packages..."
 sudo apt-get update -y
 sudo apt-get install -y ca-certificates curl gnupg git ufw jq openssl
 
-echo "[2/6] نصب Docker از مخزن Ubuntu (سازگار با سرورهای ایران) و تنظیم میرورها..."
+echo "[2/6] Installing Docker from Ubuntu repo and configuring registry mirrors..."
 sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources /etc/apt/keyrings/docker.asc
 sudo apt-get update -y
 if ! command -v docker >/dev/null 2>&1; then
@@ -68,20 +68,20 @@ fi
 
 ${
   opts.configureUfw
-    ? `echo "[3/6] پیکربندی فایروال UFW (پورت‌های 22, 80, 443)..."
+    ? `echo "[3/6] Configuring UFW firewall (ports 22, 80, 443)..."
 sudo ufw allow OpenSSH
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 sudo ufw allow 443/udp
 sudo ufw --force enable`
-    : `echo "[3/6] تنظیم خودکار فایروال غیرفعال شد (رد شدن)."`
+    : `echo "[3/6] Skipping firewall configuration."`
 }
 
-echo "[4/6] ساخت پوشه‌های ماندگار و شبکه مشترک داکر (\${DOCKER_NET})..."
+echo "[4/6] Creating persistent directories and shared Docker network (\${DOCKER_NET})..."
 mkdir -p "\${INSTALL_DIR}/data/workspaces" "\${INSTALL_DIR}/caddy"
 sudo docker network inspect "\${DOCKER_NET}" >/dev/null 2>&1 || sudo docker network create "\${DOCKER_NET}"
 
-echo "[5/6] تولید کلیدهای امنیتی (.env) و Caddyfile با Basic Auth (لایه اول امنیت)..."
+echo "[5/6] Generating .env, Caddyfile (Basic Auth), and installing 'sokkan' CLI..."
 if [ ! -f "\${INSTALL_DIR}/.env" ]; then
   SESSION_SECRET="\$(openssl rand -hex 32)"
   DATA_ENCRYPTION_KEY="\$(openssl rand -hex 32)"
@@ -92,48 +92,52 @@ SESSION_SECRET=\${SESSION_SECRET}
 DATA_ENCRYPTION_KEY=\${DATA_ENCRYPTION_KEY}
 DATA_DIR=/app/data
 WORKSPACES_DIR=/app/data/workspaces
+DOCKER_NETWORK=\${DOCKER_NET}
 CADDYFILE_PATH=/etc/caddy/Caddyfile
 CADDY_ADMIN_URL=http://caddy:2019
+CADDY_CONTAINER_NAME=caddy
 EOF
   chmod 600 "\${INSTALL_DIR}/.env"
 fi
 
 if [ ! -f "\${INSTALL_DIR}/caddy/Caddyfile" ]; then
-  BASIC_AUTH_HASH="\$(sudo docker run --rm caddy:2-alpine caddy hash-password --plaintext "\${BASIC_AUTH_PASS}")"
+  BASIC_AUTH_HASH="\$(sudo docker run --rm caddy:2 caddy hash-password --plaintext "\${BASIC_AUTH_PASS}")"
   {
     printf '{\\n  email %s\\n  admin 0.0.0.0:2019\\n}\\n\\n' "\${CADDY_EMAIL}"
     printf '%s {\\n  encode zstd gzip\\n\\n' "\${PANEL_DOMAIN}"
-    printf '  handle /api/webhooks/* {\\n    reverse_proxy sokanyar-panel:%s\\n  }\\n\\n' "\${PANEL_PORT}"
+    printf '  handle /api/webhooks/* {\\n    reverse_proxy sokkan-panel:%s\\n  }\\n\\n' "\${PANEL_PORT}"
     printf '  handle {\\n    basic_auth {\\n      %s %s\\n    }\\n' "\${BASIC_AUTH_USER}" "\${BASIC_AUTH_HASH}"
-    printf '    reverse_proxy sokanyar-panel:%s {\\n' "\${PANEL_PORT}"
+    printf '    reverse_proxy sokkan-panel:%s {\\n' "\${PANEL_PORT}"
     printf '      header_up X-Forwarded-User {http.auth.user.id}\\n'
     printf '    }\\n  }\\n}\\n\\n'
-    printf '# BEGIN MANAGED ROUTES\\n# مسیرهای پروژه‌ها توسط پنل در اینجا مدیریت می‌شوند\\n# END MANAGED ROUTES\\n'
+    printf '# BEGIN MANAGED ROUTES\\n# Sokkan managed project and service routes are injected here automatically\\n# END MANAGED ROUTES\\n'
   } > "\${INSTALL_DIR}/caddy/Caddyfile"
 fi
 
-echo "[6/6] ساخت ایمیج و اجرای استک در \${INSTALL_DIR}..."
-cd "\${INSTALL_DIR}"
-if [ "\${INCLUDE_BESZEL}" = "true" ]; then
-  sudo docker compose --profile beszel up -d --build
-else
-  sudo docker compose up -d --build
+if [ -f "\${INSTALL_DIR}/bin/sokkan" ]; then
+  chmod +x "\${INSTALL_DIR}/bin/sokkan"
+  sudo ln -sf "\${INSTALL_DIR}/bin/sokkan" /usr/local/bin/sokkan
 fi
 
+echo "[6/6] Building and starting Sokkan stack in \${INSTALL_DIR}..."
+cd "\${INSTALL_DIR}"
+sudo docker compose up -d --build --remove-orphans
+
 echo "=================================================================="
-echo "راه‌اندازی با موفقیت انجام شد (احراز هویت دو لایه فعال است)."
-echo "آدرس پنل: \${PANEL_DOMAIN}"
-echo "لایه ۱ - نام کاربری Basic Auth: \${BASIC_AUTH_USER}"
+echo "Sokkan PaaS setup completed (two-layer authentication enabled)."
+echo "Panel URL: https://\${PANEL_DOMAIN}"
+echo "Layer 1 - Basic Auth user: \${BASIC_AUTH_USER}"
 if [ "\${GENERATED_PASS}" = "true" ]; then
-  echo "لایه ۱ - رمز عبور تولیدشده: \${BASIC_AUTH_PASS}"
+  echo "Layer 1 - Generated password: \${BASIC_AUTH_PASS}"
 fi
-echo "لایه ۲ - پس از عبور از Basic Auth، رمز مدیر پنل را تنظیم و وارد شوید."
+echo "Layer 2 - Open the panel and set your Sokkan admin password."
+echo "CLI installed: run 'sokkan help' to manage your stack."
 echo "=================================================================="
 `;
 }
 
 export function generatePanelComposeYaml(opts: BootstrapOptions): string {
-  const safeNet = opts.dockerNetwork.trim() || 'caddy_net';
+  const safeNet = opts.dockerNetwork.trim() || 'web';
   const safePort = Number(opts.panelPort) || 3000;
 
   const beszelBlock = opts.includeBeszel
@@ -142,46 +146,50 @@ export function generatePanelComposeYaml(opts: BootstrapOptions): string {
     image: henrygd/beszel:latest
     container_name: beszel
     restart: unless-stopped
-    profiles: ["beszel"]
+    mem_limit: 200m
     networks:
       - ${safeNet}
     volumes:
-      - ./beszel_data:/beszel_data
-    ports:
-      - "127.0.0.1:8090:8090"
+      - beszel_data:/beszel_data
+      - beszel_socket:/beszel_socket
 
   beszel-agent:
     image: henrygd/beszel-agent:latest
     container_name: beszel-agent
     restart: unless-stopped
-    profiles: ["beszel"]
+    mem_limit: 100m
+    profiles: ["agent"]
     network_mode: host
     volumes:
+      - beszel_socket:/beszel_socket
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      LISTEN: "45876"`
+      LISTEN: /beszel_socket/beszel.sock
+      KEY: \${BESZEL_KEY:-}`
     : '';
 
   return `services:
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2
     container_name: caddy
     restart: unless-stopped
+    mem_limit: 150m
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"
     volumes:
-      - ./caddy:/etc/caddy
+      - ./caddy:/etc/caddy:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
       - ${safeNet}
 
-  sokanyar-panel:
+  sokkan-panel:
     build: .
-    container_name: sokanyar-panel
+    container_name: sokkan-panel
     restart: unless-stopped
+    mem_limit: 300m
     env_file:
       - .env
     volumes:
@@ -196,7 +204,7 @@ ${beszelBlock}
 
 volumes:
   caddy_data:
-  caddy_config:
+  caddy_config:${opts.includeBeszel ? '\n  beszel_data:\n  beszel_socket:' : ''}
 
 networks:
   ${safeNet}:

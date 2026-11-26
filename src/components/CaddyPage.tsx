@@ -369,17 +369,21 @@ export function CaddyPage() {
                         {r.upstream}
                       </td>
                       <td className="py-3 px-4">
-                        <button
-                          type="button"
-                          onClick={() => handleToggleRoute(r.projectId, !r.caddyEnabled)}
-                          className={`px-3 py-1 rounded-md text-xs font-medium cursor-pointer ${
-                            r.caddyEnabled
-                              ? 'bg-emerald-500/15 text-emerald-400'
-                              : 'bg-slate-800 text-slate-400'
-                          }`}
-                        >
-                          {r.caddyEnabled ? 'فعال در Caddy' : 'غیرفعال'}
-                        </button>
+                        {r.sourceType === 'service' ? (
+                          <span className="text-xs text-emerald-400">فعال (سرویس آماده)</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleRoute(r.projectId, !r.caddyEnabled)}
+                            className={`px-3 py-1 rounded-md text-xs font-medium cursor-pointer ${
+                              r.caddyEnabled
+                                ? 'bg-emerald-500/15 text-emerald-400'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {r.caddyEnabled ? 'فعال در Caddy' : 'غیرفعال'}
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}

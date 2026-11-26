@@ -185,7 +185,7 @@ async function executePipeline(
         deploymentId,
         `پورت‌های شناسایی‌شده: ${inspection.detectedPorts.join(', ')} | پورت انتخابی سرویس: ${project.container_port}`,
       );
-      const containerName = `sokanyar-${project.slug}`;
+      const containerName = `sokkan-${project.slug}`;
       if (project.build_mode === 'compose') {
         appendDeployLog(
           deploymentId,
@@ -281,7 +281,7 @@ async function executePipeline(
 
     const dockerNetwork = process.env.DOCKER_NETWORK?.trim() || 'web';
     await ensureDockerNetwork(dockerNetwork);
-    const containerName = `sokanyar-${project.slug}`;
+    const containerName = `sokkan-${project.slug}`;
 
     if (project.build_mode === 'compose') {
       const composeFile = path.basename(project.build_file_path || 'docker-compose.yml');
@@ -333,9 +333,9 @@ async function executePipeline(
         '--restart',
         'unless-stopped',
         '--label',
-        'sokanyar.managed=true',
+        'sokkan.managed=true',
         '--label',
-        `sokanyar.project=${project.slug}`,
+        `sokkan.project=${project.slug}`,
       ];
       if (fs.existsSync(path.join(workspaceDir, '.env'))) {
         runArgs.push('--env-file', path.join(workspaceDir, '.env'));

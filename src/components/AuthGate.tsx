@@ -1,7 +1,7 @@
-import { Lock, ShieldCheck } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import { apiFetch, setAuthToken } from '../api';
 import type { AuthStatus } from '../types';
+import { SokkanLogo } from './SokkanLogo';
 
 interface AuthGateProps {
   authStatus: AuthStatus;
@@ -48,13 +48,11 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
   return (
     <div className="min-h-screen bg-[#0B0F17] flex items-center justify-center p-6">
       <div className="w-full max-w-md bg-[#111827] border border-[#1F2937] rounded-xl p-8">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
-            {isSetup ? <ShieldCheck className="w-5 h-5" /> : <Lock className="w-5 h-5" />}
-          </div>
+        <div className="flex items-center gap-3.5 mb-6">
+          <SokkanLogo size={42} />
           <div>
             <h1 className="text-lg font-semibold text-slate-100">
-              {isSetup ? 'تنظیم رمز مدیر سکان‌یار' : 'ورود به پنل مدیریت VPS'}
+              {isSetup ? 'تنظیم رمز مدیر سکان' : 'ورود به پنل سکان'}
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
               {isSetup

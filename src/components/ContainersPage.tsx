@@ -1,7 +1,7 @@
-import { Box, Play, RefreshCw, RotateCcw, Search, Square, Terminal, Trash2, X } from 'lucide-react';
+import { Box, HardDrive, Play, RefreshCw, RotateCcw, Search, Square, Terminal, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../api';
-import type { DockerContainer, NavTab } from '../types';
+import type { DockerContainer, DockerDiskCategory, NavTab } from '../types';
 
 interface ContainersPageProps {
   onNavigate: (tab: NavTab) => void;
@@ -27,16 +27,24 @@ export function ContainersPage({ onNavigate }: ContainersPageProps) {
   const [statsMap, setStatsMap] = useState<
     Record<string, { cpuPercent: number; memUsedMb: number; memLimitMb: number; memPercent: number }>
   >({});
+  const [diskCategories, setDiskCategories] = useState<DockerDiskCategory[]>([]);
+  const [pruning, setPruning] = useState(false);
+  const [confirmPrune, setConfirmPrune] = useState(false);
+  const [pruneNotice, setPruneNotice] = useState('');
 
   const loadContainers = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const res = await apiFetch<{ dockerAvailable: boolean; containers: DockerContainer[] }>(
-        '/api/containers',
-      );
+      const [res, df] = await Promise.all([
+        apiFetch<{ dockerAvailable: boolean; containers: DockerContainer[] }>('/api/containers'),
+        apiFetch<{ dockerAvailable: boolean; categories: DockerDiskCategory[] }>(
+          '/api/docker/disk-usage',
+        ).catch(() => ({ dockerAvailable: false, categories: [] })),
+      ]);
       setDockerAvailable(res.dockerAvailable);
       setContainers(res.containers);
+      setDiskCategories(df.categories);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'خطا در خواندن کانتینرهای داکر');
     } finally {
@@ -47,6 +55,25 @@ export function ContainersPage({ onNavigate }: ContainersPageProps) {
   useEffect(() => {
     void loadContainers();
   }, [loadContainers]);
+
+  const handlePruneDocker = async () => {
+    setPruning(true);
+    setError('');
+    setPruneNotice('');
+    try {
+      const res = await apiFetch<{ reclaimedSummary: string; categories: DockerDiskCategory[] }>(
+        '/api/docker/prune',
+        { method: 'POST' },
+      );
+      setDiskCategories(res.categories);
+      setPruneNotice(res.reclaimedSummary);
+      setConfirmPrune(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'پاک‌سازی کش داکر ناموفق بود');
+    } finally {
+      setPruning(false);
+    }
+  };
 
   const handleAction = async (id: string, action: 'start' | 'stop' | 'restart' | 'remove') => {
     setBusyId(id);
@@ -124,6 +151,66 @@ export function ContainersPage({ onNavigate }: ContainersPageProps) {
           >
             مشاهده فایل‌های نصب روی VPS
           </button>
+        </div>
+      )}
+
+      {dockerAvailable && (
+        <div className="bg-[#111827] border border-[#1F2937] rounded-xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
+              <HardDrive className="w-4 h-4 text-sky-400" />
+              <span>مصرف فضای دیسک داکر و پاک‌سازی کش بیلد</span>
+            </div>
+            {diskCategories.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400 font-mono tabular-nums">
+                {diskCategories.map((cat, idx) => (
+                  <span key={cat.type} className="inline-flex items-center gap-1.5">
+                    {idx > 0 && <span className="text-slate-600">·</span>}
+                    <span className="text-slate-300">{cat.type}:</span>
+                    <span>{cat.size}</span>
+                    {cat.reclaimable && cat.reclaimable !== '0B' && (
+                      <span className="text-amber-400">({cat.reclaimable} قابل آزادسازی)</span>
+                    )}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400">
+                پاک‌سازی ایمن ایمیج‌های بلااستفاده و کش بیلد (کانتینرهای فعال و Volumeها دست‌نخورده می‌مانند).
+              </p>
+            )}
+            {pruneNotice && <p className="text-xs text-emerald-400 font-mono">{pruneNotice}</p>}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {confirmPrune ? (
+              <>
+                <button
+                  type="button"
+                  disabled={pruning}
+                  onClick={handlePruneDocker}
+                  className="px-3.5 py-2 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg cursor-pointer whitespace-nowrap"
+                >
+                  {pruning ? 'در حال پاک‌سازی...' : 'تایید پاک‌سازی ایمن'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmPrune(false)}
+                  className="px-3 py-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer"
+                >
+                  انصراف
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmPrune(true)}
+                className="px-3.5 py-2 text-xs font-medium text-slate-200 bg-[#0B0F17] border border-[#1F2937] hover:border-amber-500/40 rounded-lg cursor-pointer whitespace-nowrap"
+              >
+                پاک‌سازی کش و ایمیج‌های قدیمی
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -210,7 +297,7 @@ export function ContainersPage({ onNavigate }: ContainersPageProps) {
                         <div className="font-mono font-medium text-slate-100">{c.name}</div>
                         <div className="text-[11px] text-slate-400 mt-0.5">
                           <span className="font-mono">{c.shortId}</span>
-                          {c.managedByPanel && ' · مدیریت‌شده توسط سکان‌یار'}
+                          {c.managedByPanel && ' · مدیریت‌شده توسط سکان'}
                         </div>
                       </td>
                       <td className="py-3 px-4 font-mono text-slate-300 max-w-[200px] truncate">

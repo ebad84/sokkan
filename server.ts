@@ -46,21 +46,33 @@ import {
   getSetting,
   type DeploymentRow,
   type ProjectRow,
+  type ServiceRow,
 } from './server/db.ts';
 import {
   getContainerLogs,
   getContainerStats,
+  getDockerDiskUsage,
   getSystemHostMetrics,
   isDockerAvailable,
   isGitAvailable,
   listDockerContainers,
   performContainerAction,
+  pruneDockerUnused,
 } from './server/docker.ts';
 import {
   inspectGitHubRepo,
   parseGitHubRepoUrl,
   validateBranchName,
 } from './server/github.ts';
+import {
+  SERVICE_TEMPLATES,
+  buildServiceEnvWithDefaults,
+  deployServiceInstance,
+  findServiceTemplate,
+  removeServiceContainer,
+  resolveCommandTemplate,
+  serializeService,
+} from './server/templates.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -167,7 +179,34 @@ function serializeProject(p: ProjectRow) {
   };
 }
 
-const SESSION_COOKIE_NAME = 'sokanyar_session';
+function findDomainConflict(
+  domain: string,
+  exclude?: { projectId?: string; serviceId?: string },
+): string | null {
+  const normalized = domain.trim().toLowerCase();
+  if (!normalized) return null;
+  const proj = exclude?.projectId
+    ? (db
+        .prepare('SELECT name FROM projects WHERE LOWER(domain) = ? AND caddy_enabled = 1 AND id != ?')
+        .get(normalized, exclude.projectId) as { name: string } | undefined)
+    : (db
+        .prepare('SELECT name FROM projects WHERE LOWER(domain) = ? AND caddy_enabled = 1')
+        .get(normalized) as { name: string } | undefined);
+  if (proj) return `پروژه «${proj.name}»`;
+
+  const svc = exclude?.serviceId
+    ? (db
+        .prepare('SELECT name FROM services WHERE LOWER(domain) = ? AND caddy_enabled = 1 AND id != ?')
+        .get(normalized, exclude.serviceId) as { name: string } | undefined)
+    : (db
+        .prepare('SELECT name FROM services WHERE LOWER(domain) = ? AND caddy_enabled = 1')
+        .get(normalized) as { name: string } | undefined);
+  if (svc) return `سرویس «${svc.name}»`;
+  return null;
+}
+
+const SESSION_COOKIE_NAME = 'sokkan_session';
+const LEGACY_SESSION_COOKIE_NAME = 'sokanyar_session';
 const SESSION_TTL_DAYS = Math.max(1, Math.min(90, Number(process.env.SESSION_TTL_DAYS || 30)));
 const SESSION_TTL_MS = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
 
@@ -210,17 +249,11 @@ function setSessionCookie(req: Request, res: Response, token: string): void {
 }
 
 function clearSessionCookie(req: Request, res: Response): void {
-  const parts = [
-    `${SESSION_COOKIE_NAME}=`,
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
-    'Max-Age=0',
-  ];
-  if (isHttpsRequest(req)) {
-    parts.push('Secure');
-  }
-  res.setHeader('Set-Cookie', parts.join('; '));
+  const securePart = isHttpsRequest(req) ? '; Secure' : '';
+  res.setHeader('Set-Cookie', [
+    `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${securePart}`,
+    `${LEGACY_SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${securePart}`,
+  ]);
 }
 
 function extractPanelToken(req: Request): string {
@@ -232,7 +265,8 @@ function extractPanelToken(req: Request): string {
   if (authHeader.startsWith('Bearer ')) {
     return authHeader.slice('Bearer '.length).trim();
   }
-  const cookieToken = readCookieValue(req, SESSION_COOKIE_NAME);
+  const cookieToken =
+    readCookieValue(req, SESSION_COOKIE_NAME) || readCookieValue(req, LEGACY_SESSION_COOKIE_NAME);
   if (cookieToken) {
     return cookieToken;
   }
@@ -356,6 +390,7 @@ app.get('/api/system/status', requireAuth, async (_req, res) => {
       .reverse();
 
     const projectCount = (db.prepare('SELECT COUNT(*) as c FROM projects').get() as { c: number }).c;
+    const serviceCount = (db.prepare('SELECT COUNT(*) as c FROM services').get() as { c: number }).c;
     const deploymentCount = (db.prepare('SELECT COUNT(*) as c FROM deployments').get() as { c: number }).c;
 
     res.json({
@@ -368,6 +403,7 @@ app.get('/api/system/status', requireAuth, async (_req, res) => {
       },
       counts: {
         projects: projectCount,
+        services: serviceCount,
         deployments: deploymentCount,
       },
       hostMetrics,
@@ -434,12 +470,10 @@ app.post('/api/projects', requireAuth, async (req, res) => {
       return;
     }
     if (domain && caddyEnabled) {
-      const domainConflict = db
-        .prepare('SELECT name FROM projects WHERE LOWER(domain) = ? AND caddy_enabled = 1')
-        .get(domain) as { name: string } | undefined;
-      if (domainConflict) {
+      const conflictOwner = findDomainConflict(domain);
+      if (conflictOwner) {
         res.status(409).json({
-          error: `دامنه «${domain}» قبلاً به پروژه «${domainConflict.name}» متصل شده است.`,
+          error: `دامنه «${domain}» قبلاً به ${conflictOwner} متصل شده است.`,
         });
         return;
       }
@@ -544,12 +578,10 @@ app.patch('/api/projects/:id', requireAuth, async (req, res) => {
     const caddyEnabled =
       body.caddyEnabled !== undefined ? (body.caddyEnabled ? 1 : 0) : existing.caddy_enabled;
     if (domain && caddyEnabled === 1) {
-      const domainConflict = db
-        .prepare('SELECT name FROM projects WHERE LOWER(domain) = ? AND caddy_enabled = 1 AND id != ?')
-        .get(domain, id) as { name: string } | undefined;
-      if (domainConflict) {
+      const conflictOwner = findDomainConflict(domain, { projectId: id });
+      if (conflictOwner) {
         res.status(409).json({
-          error: `دامنه «${domain}» قبلاً به پروژه «${domainConflict.name}» متصل شده است.`,
+          error: `دامنه «${domain}» قبلاً به ${conflictOwner} متصل شده است.`,
         });
         return;
       }
@@ -799,11 +831,226 @@ app.get('/api/containers/:id/stats', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/docker/disk-usage', requireAuth, async (_req, res) => {
+  const dockerUp = await isDockerAvailable();
+  if (!dockerUp) {
+    res.json({ dockerAvailable: false, categories: [] });
+    return;
+  }
+  const categories = await getDockerDiskUsage();
+  res.json({ dockerAvailable: true, categories });
+});
+
+app.post('/api/docker/prune', requireAuth, async (_req, res) => {
+  const dockerUp = await isDockerAvailable();
+  if (!dockerUp) {
+    res.status(400).json({ error: 'سوکت داکر در این محیط متصل نیست.' });
+    return;
+  }
+  try {
+    const result = await pruneDockerUnused();
+    const categories = await getDockerDiskUsage();
+    res.json({ ok: true, ...result, categories });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'خطا در پاک‌سازی فضای داکر',
+    });
+  }
+});
+
+// One-Click Ready Apps & Databases (PaaS Templates Catalog)
+app.get('/api/templates', requireAuth, (_req, res) => {
+  res.json(SERVICE_TEMPLATES);
+});
+
+app.get('/api/services', requireAuth, (_req, res) => {
+  const rows = db.prepare('SELECT * FROM services ORDER BY created_at DESC').all() as ServiceRow[];
+  res.json(rows.map(serializeService));
+});
+
+app.post('/api/services', requireAuth, async (req, res) => {
+  try {
+    const body = req.body ?? {};
+    const templateId = String(body.templateId || '').trim();
+    const template = findServiceTemplate(templateId);
+    if (!template) {
+      res.status(400).json({ error: 'قالب سرویس انتخاب‌شده نامعتبر است.' });
+      return;
+    }
+
+    const rawSlug = String(body.slug || template.defaultSlug)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (!rawSlug || !/^[a-z0-9-]+$/.test(rawSlug)) {
+      res.status(400).json({ error: 'شناسه کانتینر (انگلیسی با حروف کوچک و خط تیره) الزامی است.' });
+      return;
+    }
+
+    const slugUsedInProjects = db.prepare('SELECT id FROM projects WHERE slug = ?').get(rawSlug);
+    if (slugUsedInProjects) {
+      res.status(409).json({ error: `شناسه «${rawSlug}» قبلاً در پروژه‌ها استفاده شده است.` });
+      return;
+    }
+
+    const name = String(body.name || '').trim() || template.name;
+    const domain = template.supportsDomain ? String(body.domain || '').trim().toLowerCase() : '';
+    const caddyEnabled = template.supportsDomain && domain.length > 0 && body.caddyEnabled !== false;
+    if (domain && !validateDomainString(domain)) {
+      res.status(400).json({ error: 'فرمت دامنه وارد شده معتبر نیست.' });
+      return;
+    }
+    if (domain && caddyEnabled) {
+      const conflictOwner = findDomainConflict(domain);
+      if (conflictOwner) {
+        res.status(409).json({
+          error: `دامنه «${domain}» قبلاً به ${conflictOwner} متصل شده است.`,
+        });
+        return;
+      }
+    }
+
+    const memLimitMb = Math.max(
+      64,
+      Math.min(2048, Number(body.memLimitMb || template.defaultMemLimitMb)),
+    );
+    const inputEnv =
+      body.envVars && typeof body.envVars === 'object' ? (body.envVars as Record<string, string>) : {};
+    const finalEnv = buildServiceEnvWithDefaults(template, inputEnv, domain);
+    const resolvedCmd = resolveCommandTemplate(template.commandTemplate, finalEnv);
+
+    const id = `svc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO services (
+        id, template_id, name, slug, image, category, container_port, domain,
+        caddy_enabled, mem_limit_mb, env_vars_enc, volumes_json, command_json,
+        status, last_message, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'deploying', '', ?, ?)`,
+    ).run(
+      id,
+      template.id,
+      name,
+      rawSlug,
+      template.image,
+      template.category,
+      template.containerPort,
+      domain,
+      caddyEnabled ? 1 : 0,
+      memLimitMb,
+      encryptSecret(JSON.stringify(finalEnv)),
+      JSON.stringify(template.volumes),
+      JSON.stringify(resolvedCmd),
+      now,
+      now,
+    );
+
+    const inserted = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as ServiceRow;
+    const deployResult = await deployServiceInstance(inserted);
+
+    db.prepare('UPDATE services SET status = ?, last_message = ?, updated_at = ? WHERE id = ?').run(
+      deployResult.status,
+      deployResult.message,
+      new Date().toISOString(),
+      id,
+    );
+
+    if (caddyEnabled && domain && deployResult.status === 'running') {
+      await syncProjectsToCaddyfile(`افزودن مسیر سرویس آماده ${rawSlug}`).catch((err) => {
+        const msg = err instanceof Error ? err.message : 'خطا در همگام‌سازی Caddy';
+        db.prepare('UPDATE services SET last_message = ? WHERE id = ?').run(
+          `${deployResult.message} (هشدار Caddy: ${msg})`,
+          id,
+        );
+      });
+    }
+
+    const finalRow = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as ServiceRow;
+    res.status(201).json({
+      service: serializeService(finalRow),
+      generatedEnv: finalEnv,
+      executionMode: deployResult.executionMode,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'خطا در راه‌اندازی سرویس آماده';
+    res.status(400).json({ error: msg.includes('UNIQUE') ? 'این شناسه سرویس قبلاً ثبت شده است.' : msg });
+  }
+});
+
+app.post('/api/services/:id/redeploy', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const row = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as ServiceRow | undefined;
+  if (!row) {
+    res.status(404).json({ error: 'سرویس پیدا نشد.' });
+    return;
+  }
+  const deployResult = await deployServiceInstance(row);
+  db.prepare('UPDATE services SET status = ?, last_message = ?, updated_at = ? WHERE id = ?').run(
+    deployResult.status,
+    deployResult.message,
+    new Date().toISOString(),
+    id,
+  );
+  if (row.caddy_enabled === 1 && row.domain) {
+    await syncProjectsToCaddyfile(`به‌روزرسانی سرویس آماده ${row.slug}`).catch(() => {});
+  }
+  const updated = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as ServiceRow;
+  res.json({ service: serializeService(updated), executionMode: deployResult.executionMode });
+});
+
+app.post('/api/services/:id/:action', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const action = String(req.params.action || '');
+  if (!['start', 'stop', 'restart'].includes(action)) {
+    res.status(400).json({ error: 'عملیات نامعتبر است.' });
+    return;
+  }
+  const row = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as ServiceRow | undefined;
+  if (!row) {
+    res.status(404).json({ error: 'سرویس پیدا نشد.' });
+    return;
+  }
+  try {
+    const dockerUp = await isDockerAvailable();
+    if (dockerUp) {
+      await performContainerAction(`sokkan-${row.slug}`, action as 'start' | 'stop' | 'restart');
+    }
+    const nextStatus = action === 'stop' ? 'stopped' : 'running';
+    db.prepare('UPDATE services SET status = ?, updated_at = ? WHERE id = ?').run(
+      nextStatus,
+      new Date().toISOString(),
+      id,
+    );
+    const updated = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as ServiceRow;
+    res.json({ ok: true, service: serializeService(updated) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'اجرای عملیات ناموفق بود.' });
+  }
+});
+
+app.delete('/api/services/:id', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const row = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as ServiceRow | undefined;
+  if (!row) {
+    res.status(404).json({ error: 'سرویس پیدا نشد.' });
+    return;
+  }
+  await removeServiceContainer(row.slug);
+  db.prepare('DELETE FROM services WHERE id = ?').run(id);
+  if (row.caddy_enabled === 1 && row.domain) {
+    await syncProjectsToCaddyfile(`حذف مسیر سرویس آماده ${row.slug}`).catch(() => {});
+  }
+  res.json({ ok: true });
+});
+
 // Caddyfile Global & Managed Routes
 app.get('/api/caddy', requireAuth, async (_req, res) => {
   const content = getSetting('caddyfile_content') ?? DEFAULT_CADDYFILE;
   const projects = db.prepare('SELECT * FROM projects ORDER BY created_at ASC').all() as ProjectRow[];
-  const managedPreview = renderManagedRoutesBlock(projects);
+  const services = db.prepare('SELECT * FROM services ORDER BY created_at ASC').all() as ServiceRow[];
+  const managedPreview = renderManagedRoutesBlock(projects, services);
   const snapshots = listCaddySnapshots(20);
   const caddyStatus = await isCaddyAvailable();
 
@@ -812,16 +1059,32 @@ app.get('/api/caddy', requireAuth, async (_req, res) => {
     managedPreview,
     snapshots,
     caddyStatus,
-    routes: projects.map((p) => ({
-      projectId: p.id,
-      name: p.name,
-      slug: p.slug,
-      domain: p.domain,
-      upstream: `sokanyar-${p.slug}:${p.container_port}`,
-      containerPort: p.container_port,
-      caddyEnabled: p.caddy_enabled === 1,
-      caddyExtraDirectives: p.caddy_extra_directives,
-    })),
+    routes: [
+      ...projects.map((p) => ({
+        projectId: p.id,
+        sourceType: 'project' as const,
+        name: p.name,
+        slug: p.slug,
+        domain: p.domain,
+        upstream: `sokkan-${p.slug}:${p.container_port}`,
+        containerPort: p.container_port,
+        caddyEnabled: p.caddy_enabled === 1,
+        caddyExtraDirectives: p.caddy_extra_directives,
+      })),
+      ...services
+        .filter((s) => s.domain.trim().length > 0)
+        .map((s) => ({
+          projectId: s.id,
+          sourceType: 'service' as const,
+          name: `${s.name} (سرویس آماده)`,
+          slug: s.slug,
+          domain: s.domain,
+          upstream: `sokkan-${s.slug}:${s.container_port}`,
+          containerPort: s.container_port,
+          caddyEnabled: s.caddy_enabled === 1,
+          caddyExtraDirectives: '',
+        })),
+    ],
   });
 });
 
@@ -905,12 +1168,12 @@ app.post('/api/provisioning/generate', requireAuth, (req, res) => {
   const opts: BootstrapOptions = {
     panelDomain: String(body.panelDomain || 'panel.example.com'),
     caddyEmail: String(body.caddyEmail || 'admin@example.com'),
-    dockerNetwork: String(body.dockerNetwork || 'caddy_net').replace(/[^a-zA-Z0-9_-]/g, '') || 'caddy_net',
+    dockerNetwork: String(body.dockerNetwork || 'web').replace(/[^a-zA-Z0-9_-]/g, '') || 'web',
     panelPort: Math.max(1024, Math.min(65535, Number(body.panelPort || 3000))),
     basicAuthUser: String(body.basicAuthUser || 'admin'),
     includeBeszel: Boolean(body.includeBeszel),
     configureUfw: body.configureUfw !== false,
-    panelRepoOrImage: String(body.panelRepoOrImage || 'sokanyar-panel:latest'),
+    panelRepoOrImage: String(body.panelRepoOrImage || 'sokkan-panel:latest'),
   };
   res.json({
     bootstrapScript: generateBootstrapScript(opts),
@@ -1059,7 +1322,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`SokanYar CI/CD server listening on http://0.0.0.0:${PORT}`);
+    console.log(`Sokkan PaaS server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
