@@ -741,6 +741,46 @@
         color: var(--text-muted);
       }
 
+      .footer-author {
+        margin-top: 20px;
+        padding-top: 20px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+
+      .author-lockup {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .author-logo {
+        width: 28px;
+        height: 28px;
+        padding: 3px;
+        border-radius: 7px;
+        background: #ffffff;
+        object-fit: contain;
+        border: 1px solid var(--border-strong);
+        flex-shrink: 0;
+      }
+
+      .footer-author a {
+        color: var(--text-secondary);
+        font-weight: 500;
+        transition: color 150ms var(--ease);
+      }
+
+      .footer-author a:hover {
+        color: var(--accent);
+      }
+
       .footer-links {
         display: flex;
         align-items: center;
@@ -1285,6 +1325,36 @@ sudo bash bootstrap-vps.sh</pre>
           >
             مستند معماری (DOCS)
           </a>
+        </div>
+      </div>
+
+      <div class="container">
+        <div class="footer-author">
+          <div class="author-lockup">
+            <img
+              src="./synapse-logo.png"
+              alt="لوگوی Synapse Electronics"
+              class="author-logo"
+              referrerpolicy="no-referrer"
+            />
+            <span>ساخته‌شده توسط</span>
+            <a href="https://ebad84.ir" target="_blank" rel="noopener noreferrer" class="mono">
+              ebad84.ir
+            </a>
+          </div>
+          <div class="footer-links">
+            <a href="https://ebad84.ir" target="_blank" rel="noopener noreferrer" class="mono">
+              ebad84.ir
+            </a>
+            <span aria-hidden="true">·</span>
+            <a
+              href="https://t.me/Synapse_Electronics"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              کانال تلگرام <span class="mono">@Synapse_Electronics</span>
+            </a>
+          </div>
         </div>
       </div>
     </footer>

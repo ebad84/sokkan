@@ -199,3 +199,14 @@ npm run build    # بیلد نسخه پروداکشن
 - [ ] **ترمینال وب کانتینر (Web Exec Shell):** اجرای دستورهای سریع داخل کانتینرها از محیط پنل.
 - [ ] **ساخت خودکار Webhook در گیتهاب:** ثبت خودکار Webhook روی ریپو هنگام اتصال پروژه با PAT.
 - [ ] **پیش‌نمایش Pull Requestها (Preview Deployments):** بالا آوردن نسخه موقت برای هر PR روی ساب‌دامین جداگانه.
+
+---
+
+<p align="center">
+  <img src="./docs/synapse-logo.png" alt="Synapse Electronics Logo" width="28" height="28" align="absmiddle" />
+  &nbsp;
+  توسعه‌یافته توسط <a href="https://ebad84.ir"><strong>ebad84.ir</strong></a>
+  &nbsp;·&nbsp;
+  کانال تلگرام: <a href="https://t.me/Synapse_Electronics"><strong>@Synapse_Electronics</strong></a>
+</p>
+
