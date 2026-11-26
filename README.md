@@ -202,6 +202,12 @@ npm run build    # بیلد نسخه پروداکشن
 
 ---
 
+## لایسنس (License)
+
+این پروژه تحت مجوز **MIT** منتشر شده است. برای جزئیات بیشتر فایل [`LICENSE.md`](./LICENSE.md) را ببینید.
+
+---
+
 <p align="center">
   <img src="./docs/synapse-logo.png" alt="Synapse Electronics Logo" width="28" height="28" align="absmiddle" />
   &nbsp;
