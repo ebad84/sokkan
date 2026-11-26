@@ -311,11 +311,56 @@
         background: var(--surface);
       }
 
-      .hero-showcase img {
+      .hero-slide {
+        position: absolute;
+        inset: 0;
         width: 100%;
         height: 100%;
         object-fit: cover;
         display: block;
+        opacity: 0;
+        transition: opacity 700ms var(--ease);
+        pointer-events: none;
+      }
+
+      .hero-slide.is-active {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .hero-slide-controls {
+        position: absolute;
+        bottom: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(11, 15, 23, 0.72);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        z-index: 2;
+      }
+
+      .hero-slide-btn {
+        width: 24px;
+        height: 4px;
+        padding: 0;
+        border: none;
+        border-radius: 2px;
+        background: rgba(148, 163, 184, 0.4);
+        transition: background-color 200ms var(--ease), transform 200ms var(--ease);
+      }
+
+      .hero-slide-btn:hover {
+        background: rgba(248, 250, 252, 0.75);
+      }
+
+      .hero-slide-btn.is-active {
+        background: var(--accent);
+        transform: scaleX(1.25);
       }
 
       /* Interactive Terminal Card */
@@ -909,13 +954,41 @@
               </div>
             </div>
 
-            <div class="hero-showcase">
+            <div class="hero-showcase" id="hero-showcase" aria-roledescription="carousel" aria-label="تصاویر معرفی سکان">
               <img
-                src="./sokkan-showcase.jpg"
-                alt="تصویر معرفی پلتفرم سکان — زیرساخت سبک Docker و مدیریت سرور"
+                src="./sokkan-banner.jpg"
+                alt="بنر معرفی سکان — پلتفرم سبک PaaS برای VPS"
+                class="hero-slide is-active"
+                data-slide="0"
                 referrerpolicy="no-referrer"
                 onerror="this.onerror=null;this.src='./sokkan-logo.jpg';"
               />
+              <img
+                src="./sokkan-showcase.jpg"
+                alt="تصویر معرفی پلتفرم سکان — زیرساخت سبک Docker و مدیریت سرور"
+                class="hero-slide"
+                data-slide="1"
+                referrerpolicy="no-referrer"
+                onerror="this.onerror=null;this.src='./sokkan-logo.jpg';"
+              />
+              <div class="hero-slide-controls" role="tablist" aria-label="انتخاب تصویر معرفی">
+                <button
+                  type="button"
+                  class="hero-slide-btn is-active"
+                  data-slide-btn="0"
+                  role="tab"
+                  aria-selected="true"
+                  aria-label="تصویر معرفی ۱"
+                ></button>
+                <button
+                  type="button"
+                  class="hero-slide-btn"
+                  data-slide-btn="1"
+                  role="tab"
+                  aria-selected="false"
+                  aria-label="تصویر معرفی ۲"
+                ></button>
+              </div>
             </div>
           </div>
 
@@ -1516,8 +1589,60 @@ sudo bash bootstrap-vps.sh</pre>
           });
         });
 
+        // Auto-switching Hero Showcase
+        var showcaseEl = document.getElementById('hero-showcase');
+        var slides = document.querySelectorAll('[data-slide]');
+        var slideBtns = document.querySelectorAll('[data-slide-btn]');
+        var activeSlide = 0;
+        var slideTimer = null;
+
+        function setSlide(index) {
+          activeSlide = index % slides.length;
+          slides.forEach(function (img, i) {
+            img.classList.toggle('is-active', i === activeSlide);
+          });
+          slideBtns.forEach(function (btn, i) {
+            var isCurrent = i === activeSlide;
+            btn.classList.toggle('is-active', isCurrent);
+            btn.setAttribute('aria-selected', isCurrent ? 'true' : 'false');
+          });
+        }
+
+        function startSlideShow() {
+          if (slideTimer) clearInterval(slideTimer);
+          if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            return;
+          }
+          slideTimer = setInterval(function () {
+            setSlide(activeSlide + 1);
+          }, 4500);
+        }
+
+        function stopSlideShow() {
+          if (slideTimer) {
+            clearInterval(slideTimer);
+            slideTimer = null;
+          }
+        }
+
+        slideBtns.forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var idx = Number(btn.getAttribute('data-slide-btn') || 0);
+            setSlide(idx);
+            startSlideShow();
+          });
+        });
+
+        if (showcaseEl) {
+          showcaseEl.addEventListener('mouseenter', stopSlideShow);
+          showcaseEl.addEventListener('mouseleave', startSlideShow);
+          showcaseEl.addEventListener('focusin', stopSlideShow);
+          showcaseEl.addEventListener('focusout', startSlideShow);
+        }
+
         renderTerminal('install');
         renderCatalog('all');
+        startSlideShow();
       })();
     </script>
   </body>
