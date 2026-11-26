@@ -18,13 +18,26 @@
    - Portainer به‌تنهایی CI/CD متصل به گیتهاب و مدیریت `Caddyfile` ندارد.
 
 **سکان (Sokkan)** دقیقاً برای پر کردن این شکاف ساخته شد:
-- **فوق‌العاده سبک:** یک کانتینر Node.js + SQLite (حدود ۶۰ تا ۱۲۰ مگابایت رم، با سقف `mem_limit: 300m`).
-- **جایگزین Portainer:** اتصال مستقیم به `/var/run/docker.sock` برای مشاهده کانتینرها، مصرف منابع (CPU/RAM)، لاگ زنده و Start/Stop/Restart/Remove.
+- **فوق‌العاده سبک:** کل استک اصلی فقط ۲ کانتینر است (`sokkan-panel` + `caddy`) و در حالت عادی حدود **۸۰ تا ۱۶۵ مگابایت رم** مصرف می‌کند (در مقایسه با ~۷۰۰MB تا ۱.۴GB رم در Coolify و نیاز به Proxy/CI جداگانه در Portainer).
+- **جایگزین Portainer:** اتصال مستقیم به `/var/run/docker.sock` برای مشاهده کانتینرها، مصرف منابع (CPU/RAM)، لاگ زنده، پاک‌سازی دیسک (`docker system df` / `prune`) و Start/Stop/Restart/Remove.
 - **CI/CD واقعی متصل به گیتهاب:** تشخیص خودکار `Dockerfile` و `docker-compose.yml`، دیپلوی دستی، **GitHub Webhook** (با امضای HMAC-SHA256) و **Polling دوره‌ای** با استریم زنده لاگ بیلد (SSE).
 - **نصب یک‌کلیکه سرویس‌های آماده و دیتابیس‌ها:** PostgreSQL، Redis، MariaDB، MongoDB، n8n، MinIO، Uptime Kuma، Memos، Vaultwarden و Adminer.
 - **کنترل کامل روی `Caddyfile`:** ویرایشگر زنده `Caddyfile` با اعتبارسنجی قبل از اعمال، Reload خودکار، تاریخچه نسخه‌ها (Snapshot) و Rollback آنی — بدون اینکه کنترل دستی شما را بگیرد.
 - **ابزار خط فرمان اختصاصی (`sokkan`):** مدیریت سریع استک، آپدیت، بکاپ، تمیزکاری دیسک و عیب‌یابی مستقیم از ترمینال سرور.
 - **بومی‌سازی‌شده برای VPS ایران:** نصب داکر از مخزن اوبونتو، رجیستری میرورهای ایرانی، حذف وابستگی به Alpine APK در بیلد پنل، Swap دو گیگابایتی و مدیریت محدودیت رم.
+
+### بودجه منابع (Resource Budget) و مقایسه با Portainer و Coolify
+
+| پلتفرم | رم پایه (Idle) | کانتینرهای زیرساخت | حداقل VPS عملی | نقاط قوت و محدودیت |
+| :--- | :--- | :--- | :--- | :--- |
+| **سکان (Sokkan)** | ~۸۰ تا ۱۶۵ MB *(+۴۰–۷۰MB با Beszel)* | ۲ (`sokkan-panel`, `caddy`) | ۱ vCPU / ۱–۲ GB RAM | ترکیب PaaS + CI/CD + Caddyfile زنده + CLI، بهینه برای VPSهای کم‌مصرف و شبکه ایران |
+| **Portainer CE** | ~۴۰ تا ۱۰۰ MB *(بدون Proxy/CI)* | ۱ (`portainer`) | ۱ vCPU / ۱ GB RAM | مدیریت عمیق Docker/Swarm، اما بدون CI/CD گیتهاب، بدون Reverse Proxy و بدون SSL خودکار |
+| **Coolify** | ~۷۰۰ MB تا ۱.۴ GB | ۵ تا ۷ *(Laravel, Postgres, Redis, Proxy...)* | ۲ vCPU / ۴ GB RAM | بسیار کامل و چندسروره، اما سنگین برای VPS دوگیگی، کنترل دستی محدود روی Proxy و حساس به تحریم در ایران |
+
+**راهنمای انتخاب سایز VPS برای سکان:**
+- **VPS یک گیگابایتی (+ ۲GB Swap):** مناسب اجرای سکان + ۲ تا ۳ سرویس سبک (سایت استاتیک، API سبک Go/Node، Memos، Vaultwarden).
+- **VPS دو گیگابایتی (+ ۲GB Swap — هدف اصلی سکان):** بیش از ۱.۵GB رم آزاد؛ مناسب اجرای هم‌زمان چندین پروژه Node/Python + PostgreSQL + Redis + n8n + Beszel.
+- **VPS چهار گیگابایتی به بالا:** بدون محدودیت برای بیلدهای سنگین Next.js/Rust و تعداد زیاد میکروسرویس و دیتابیس.
 
 ---
 
