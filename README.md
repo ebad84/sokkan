@@ -6,7 +6,7 @@
 
 **سکان (Sokkan)** یک **PaaS (Platform as a Service)** سبک، سریع و فارسی (RTL) برای استقرار خودکار پروژه‌های GitHub، نصب یک‌کلیکه دیتابیس‌ها و سرویس‌های آماده، مدیریت کانتینرهای Docker (بدون نیاز به Portainer) و کنترل زنده `Caddyfile` با SSL خودکار روی سرورهای مجازی کم‌مصرف — **به‌ویژه بهینه‌شده برای VPSهای ۲ گیگابایت رم و شبکه ایران.**
 
-> صفحه معرفی و مستندات آنلاین (GitHub Pages): **[ebad84.github.io/sokkan-yar](https://ebad84.github.io/sokkan-yar/)** · مستند کامل معماری و توسعه: [`DOCS.md`](./DOCS.md)
+> صفحه معرفی و مستندات آنلاین (GitHub Pages): **[ebad84.github.io/sokkan](https://ebad84.github.io/sokkan/)** · مستند کامل معماری و توسعه: [`DOCS.md`](./DOCS.md)
 
 ---
 
@@ -106,7 +106,7 @@ Internet / ArvanCloud DNS
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git
-sudo git clone https://github.com/ebad84/sokkan-yar.git /opt/sokkan
+sudo git clone https://github.com/ebad84/sokkan.git /opt/sokkan
 cd /opt/sokkan
 ```
 
