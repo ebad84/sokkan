@@ -1,0 +1,1407 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>سکان (Sokkan) — پلتفرم سبک PaaS و CI/CD خودمیزبان برای VPS</title>
+    <meta
+      name="description"
+      content="سکان (Sokkan) یک پلتفرم سبک PaaS و CI/CD خودمیزبان برای VPSهای کم‌مصرف (۱ تا ۲ گیگابایت رم) با Docker، Caddy v2، دیپلوی خودکار گیتهاب و نصب یک‌کلیکه سرویس‌ها."
+    />
+    <meta property="og:title" content="سکان (Sokkan) — پلتفرم سبک PaaS و CI/CD برای VPS" />
+    <meta
+      property="og:description"
+      content="دیپلوی خودکار گیتهاب، مدیریت زنده Caddyfile و SSL، نصب یک‌کلیکه دیتابیس و اپ‌ها با تنها ۸۰ تا ۱۶۵ مگابایت رم پایه."
+    />
+    <meta property="og:image" content="./sokkan-logo.jpg" />
+    <link rel="icon" type="image/svg+xml" href="./sokkan-logo.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Vazirmatn:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #0b0f17;
+        --surface: #111827;
+        --surface-elevated: #161f30;
+        --border: #1f2937;
+        --border-strong: #334155;
+        --text: #f8fafc;
+        --text-secondary: #cbd5e1;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-hover: #7dd3fc;
+        --accent-ink: #082f49;
+        --accent-soft: rgba(56, 189, 248, 0.1);
+        --success: #34d399;
+        --radius-sm: 8px;
+        --radius-md: 12px;
+        --radius-lg: 16px;
+        --ease: cubic-bezier(0.16, 1, 0.3, 1);
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+        background-color: var(--bg);
+        color: var(--text);
+        font-family: 'Vazirmatn', system-ui, -apple-system, 'Segoe UI', Tahoma, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        line-height: 1.65;
+      }
+
+      body {
+        margin: 0;
+        background-color: var(--bg);
+        color: var(--text);
+        font-size: 15px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+        *,
+        *::before,
+        *::after {
+          transition-duration: 0.01ms !important;
+          animation-duration: 0.01ms !important;
+        }
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      button {
+        font-family: inherit;
+        cursor: pointer;
+      }
+
+      a:focus-visible,
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+
+      .mono {
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        direction: ltr;
+        unicode-bidi: isolate;
+      }
+
+      .tabular {
+        font-variant-numeric: tabular-nums;
+      }
+
+      .container {
+        width: 100%;
+        max-width: 1200px;
+        margin-inline: auto;
+        padding-inline: 24px;
+      }
+
+      /* Top Bar Contract: 3 zones separated cleanly */
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 30;
+        background: rgba(11, 15, 23, 0.88);
+        backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border);
+      }
+
+      .topbar-inner {
+        height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 32px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 18px;
+        font-weight: 700;
+        color: var(--text);
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .brand img {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        object-fit: cover;
+        border: 1px solid var(--border);
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 28px;
+      }
+
+      .nav-links a {
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--text-muted);
+        white-space: nowrap;
+        flex-shrink: 0;
+        padding-block: 4px;
+        border-bottom: 1px solid transparent;
+        transition: color 160ms var(--ease), border-color 160ms var(--ease);
+      }
+
+      .nav-links a:hover {
+        color: var(--text);
+        border-bottom-color: var(--border-strong);
+      }
+
+      .btn-primary {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 9px 18px;
+        min-height: 40px;
+        border-radius: var(--radius-sm);
+        background: var(--accent);
+        color: var(--accent-ink);
+        font-size: 13.5px;
+        font-weight: 700;
+        border: none;
+        white-space: nowrap;
+        flex-shrink: 0;
+        transition: background-color 160ms var(--ease), transform 160ms var(--ease);
+      }
+
+      .btn-primary:hover {
+        background: var(--accent-hover);
+      }
+
+      .btn-primary:active {
+        transform: translateY(1px);
+      }
+
+      .btn-secondary {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 9px 18px;
+        min-height: 40px;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 13.5px;
+        font-weight: 600;
+        border: 1px solid var(--border-strong);
+        white-space: nowrap;
+        flex-shrink: 0;
+        transition: border-color 160ms var(--ease), color 160ms var(--ease), background-color 160ms var(--ease);
+      }
+
+      .btn-secondary:hover {
+        border-color: var(--accent);
+        color: var(--text);
+        background: rgba(56, 189, 248, 0.06);
+      }
+
+      /* Hero Section */
+      .hero {
+        padding-top: 64px;
+        padding-bottom: 56px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+        gap: 40px;
+        align-items: stretch;
+      }
+
+      .hero-copy {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+
+      .hero-kicker {
+        font-size: 13px;
+        color: var(--accent);
+        font-weight: 600;
+        margin-bottom: 14px;
+      }
+
+      .hero-title {
+        margin: 0 0 18px;
+        font-size: clamp(2.15rem, 3.8vw, 3.25rem);
+        font-weight: 700;
+        line-height: 1.25;
+        letter-spacing: -0.015em;
+        text-wrap: balance;
+        color: var(--text);
+      }
+
+      .hero-desc {
+        margin: 0 0 28px;
+        font-size: 16px;
+        color: var(--text-secondary);
+        max-width: 56ch;
+        line-height: 1.75;
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .hero-meta {
+        margin-top: 22px;
+        font-size: 13px;
+        color: var(--text-muted);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      /* Interactive Terminal Card */
+      .terminal-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .terminal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+        background: rgba(11, 15, 23, 0.6);
+        flex-wrap: wrap;
+      }
+
+      .terminal-tabs {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        background: var(--bg);
+        padding: 4px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+      }
+
+      .terminal-tab {
+        padding: 6px 12px;
+        font-size: 12.5px;
+        font-weight: 500;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--text-muted);
+        white-space: nowrap;
+        transition: background-color 140ms var(--ease), color 140ms var(--ease);
+      }
+
+      .terminal-tab:hover {
+        color: var(--text);
+      }
+
+      .terminal-tab.active {
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+
+      .copy-btn {
+        padding: 6px 12px;
+        min-height: 32px;
+        font-size: 12px;
+        font-weight: 600;
+        border-radius: 6px;
+        border: 1px solid var(--border-strong);
+        background: transparent;
+        color: var(--text-secondary);
+        white-space: nowrap;
+        transition: border-color 150ms var(--ease), color 150ms var(--ease);
+      }
+
+      .copy-btn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .terminal-body {
+        padding: 20px;
+        margin: 0;
+        flex: 1;
+        overflow-x: auto;
+        font-size: 13px;
+        line-height: 1.75;
+        color: #e2e8f0;
+        background: #090d14;
+      }
+
+      .t-prompt {
+        color: var(--accent);
+      }
+      .t-muted {
+        color: #64748b;
+      }
+      .t-ok {
+        color: var(--success);
+      }
+
+      /* Proof Strip directly under Hero */
+      .proof-strip {
+        margin-top: 48px;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        background: var(--surface);
+        overflow: hidden;
+      }
+
+      .proof-cell {
+        padding: 20px 22px;
+        border-left: 1px solid var(--border);
+      }
+
+      .proof-cell:last-child {
+        border-left: none;
+      }
+
+      .proof-value {
+        font-size: 24px;
+        font-weight: 700;
+        color: var(--text);
+        line-height: 1.2;
+      }
+
+      .proof-label {
+        margin-top: 6px;
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+
+      /* Sections */
+      .section {
+        padding-block: 72px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .section-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 36px;
+        flex-wrap: wrap;
+      }
+
+      .section-title {
+        margin: 0;
+        font-size: clamp(1.5rem, 2.5vw, 2.1rem);
+        font-weight: 700;
+        color: var(--text);
+        text-wrap: balance;
+      }
+
+      .section-sub {
+        margin: 8px 0 0;
+        font-size: 15px;
+        color: var(--text-muted);
+        max-width: 62ch;
+      }
+
+      /* Asymmetric Bento Grid */
+      .bento-grid {
+        display: grid;
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+        gap: 20px;
+      }
+
+      .bento-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .span-7 {
+        grid-column: span 7;
+      }
+      .span-5 {
+        grid-column: span 5;
+      }
+      .span-12 {
+        grid-column: span 12;
+      }
+
+      .card-num {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--accent);
+      }
+
+      .card-title {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        color: var(--text);
+      }
+
+      .card-desc {
+        margin: 0;
+        font-size: 14.5px;
+        color: var(--text-secondary);
+        line-height: 1.75;
+      }
+
+      .card-meta-line {
+        margin-top: auto;
+        padding-top: 12px;
+        border-top: 1px solid var(--border);
+        font-size: 12.5px;
+        color: var(--text-muted);
+      }
+
+      /* Interactive One-Click Apps Catalog */
+      .catalog-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+
+      .segmented {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+      }
+
+      .seg-btn {
+        padding: 7px 14px;
+        min-height: 36px;
+        font-size: 13px;
+        font-weight: 500;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--text-muted);
+        white-space: nowrap;
+        transition: background-color 150ms var(--ease), color 150ms var(--ease);
+      }
+
+      .seg-btn:hover {
+        color: var(--text);
+      }
+
+      .seg-btn.active {
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+
+      .catalog-list {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      .catalog-item {
+        padding: 14px 16px;
+        border-radius: var(--radius-sm);
+        background: var(--bg);
+        border: 1px solid var(--border);
+      }
+
+      .catalog-item-name {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--text);
+      }
+
+      .catalog-item-meta {
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      /* Comparison & Resource Tables */
+      .table-wrap {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+        min-width: 720px;
+      }
+
+      thead th {
+        text-align: right;
+        padding: 14px 18px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-muted);
+        background: rgba(11, 15, 23, 0.7);
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+
+      tbody td {
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--border);
+        color: var(--text-secondary);
+        vertical-align: top;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      tbody tr:hover {
+        background: rgba(30, 41, 59, 0.28);
+      }
+
+      .col-sokkan {
+        color: var(--text);
+        font-weight: 600;
+        background: rgba(56, 189, 248, 0.04);
+      }
+
+      .col-accent {
+        color: var(--accent);
+        font-weight: 700;
+      }
+
+      .col-good {
+        color: var(--success);
+        font-weight: 600;
+      }
+
+      .table-note {
+        margin-top: 16px;
+        font-size: 13.5px;
+        color: var(--text-muted);
+      }
+
+      /* Install & CLI Section */
+      .install-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 24px;
+        align-items: start;
+      }
+
+      .code-block {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+      }
+
+      .code-block-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-secondary);
+      }
+
+      .code-block pre {
+        margin: 0;
+        padding: 18px;
+        overflow-x: auto;
+        font-size: 13px;
+        line-height: 1.8;
+        background: #090d14;
+        color: #e2e8f0;
+      }
+
+      .cli-list {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+      }
+
+      .cli-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 13px 18px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .cli-row:last-child {
+        border-bottom: none;
+      }
+
+      .cli-cmd {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--accent);
+        white-space: nowrap;
+      }
+
+      .cli-desc {
+        font-size: 13.5px;
+        color: var(--text-secondary);
+      }
+
+      /* Footer */
+      .footer {
+        padding-block: 36px;
+      }
+
+      .footer-inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        flex-wrap: wrap;
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+
+      .footer-links {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        flex-wrap: wrap;
+      }
+
+      .footer-links a:hover {
+        color: var(--text);
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      /* Responsive */
+      @media (max-width: 980px) {
+        .hero-grid,
+        .install-grid {
+          grid-template-columns: 1fr;
+        }
+        .span-7,
+        .span-5 {
+          grid-column: span 12;
+        }
+        .proof-strip {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .proof-cell {
+          border-bottom: 1px solid var(--border);
+        }
+        .catalog-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 720px) {
+        .nav-links {
+          display: none;
+        }
+        .hero {
+          padding-top: 40px;
+          padding-bottom: 40px;
+        }
+        .section {
+          padding-block: 48px;
+        }
+        .cli-row {
+          flex-direction: column;
+          gap: 4px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar-inner">
+        <a href="#top" class="brand">
+          <img
+            src="./sokkan-logo.jpg"
+            alt="لوگوی سکان"
+            referrerpolicy="no-referrer"
+            onerror="this.onerror=null;this.src='./sokkan-logo.svg';"
+          />
+          <span>سکان</span>
+        </a>
+
+        <nav class="nav-links" aria-label="ناوبری اصلی">
+          <a href="#capabilities">امکانات</a>
+          <a href="#comparison">مقایسه و منابع</a>
+          <a href="#cli">ابزار خط فرمان</a>
+          <a href="#install">نصب سریع</a>
+        </nav>
+
+        <a
+          href="https://github.com/ebad84/sokkan-yar"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="btn-primary"
+        >
+          مشاهده در گیتهاب
+        </a>
+      </div>
+    </header>
+
+    <main id="top">
+      <!-- Hero -->
+      <section class="hero">
+        <div class="container">
+          <div class="hero-grid">
+            <div class="hero-copy">
+              <div class="hero-kicker">پلتفرم PaaS و CI/CD خودمیزبان برای VPS</div>
+              <h1 class="hero-title">دیپلوی خودکار و مدیریت سرور روی VPSهای کم‌مصرف</h1>
+              <p class="hero-desc">
+                <strong>سکان (Sokkan)</strong> یک جایگزین فوق‌سبک برای Coolify و Portainer است؛
+                ساخته‌شده برای VPSهای ۱ تا ۲ گیگابایت رم و شبکه ایران. پروژه‌های گیتهاب را خودکار
+                دیپلوی کنید، دیتابیس‌ها و سرویس‌های آماده را با یک کلیک بالا بیاورید و
+                <span class="mono">Caddyfile</span> را زنده با SSL خودکار کنترل کنید.
+              </p>
+              <div class="hero-actions">
+                <a href="#install" class="btn-primary">نصب روی سرور در ۲ دقیقه</a>
+                <a
+                  href="https://github.com/ebad84/sokkan-yar/blob/main/DOCS.md"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn-secondary"
+                >
+                  مطالعه مستند معماری
+                </a>
+              </div>
+              <div class="hero-meta">
+                <span>Docker + Caddy v2</span>
+                <span aria-hidden="true">·</span>
+                <span>SQLite تک‌فایلی</span>
+                <span aria-hidden="true">·</span>
+                <span>سازگار با میرورهای ایران</span>
+                <span aria-hidden="true">·</span>
+                <span>رابط فارسی RTL</span>
+              </div>
+            </div>
+
+            <div class="terminal-card" aria-label="پیش‌نمایش دستورات سکان">
+              <div class="terminal-head">
+                <div class="terminal-tabs" role="tablist" aria-label="نمونه دستورات ترمینال">
+                  <button type="button" class="terminal-tab active" data-term="install" role="tab" aria-selected="true">
+                    نصب سریع
+                  </button>
+                  <button type="button" class="terminal-tab" data-term="status" role="tab" aria-selected="false">
+                    sokkan status
+                  </button>
+                  <button type="button" class="terminal-tab" data-term="update" role="tab" aria-selected="false">
+                    sokkan update
+                  </button>
+                  <button type="button" class="terminal-tab" data-term="doctor" role="tab" aria-selected="false">
+                    sokkan doctor
+                  </button>
+                </div>
+                <button type="button" class="copy-btn" id="hero-copy-btn">کپی دستور</button>
+              </div>
+              <pre class="terminal-body mono" id="hero-terminal"></pre>
+            </div>
+          </div>
+
+          <div class="proof-strip tabular">
+            <div class="proof-cell">
+              <div class="proof-value">۸۰–۱۶۵ MB</div>
+              <div class="proof-label">مصرف رم پایه استک اصلی (پنل + Caddy)</div>
+            </div>
+            <div class="proof-cell">
+              <div class="proof-value">۲ کانتینر</div>
+              <div class="proof-label">زیرساخت پایه بدون Postgres و Redis اجباری</div>
+            </div>
+            <div class="proof-cell">
+              <div class="proof-value">۱۰ سرویس آماده</div>
+              <div class="proof-label">نصب یک‌کلیکه با Volume دائمی و سقف رم</div>
+            </div>
+            <div class="proof-cell">
+              <div class="proof-value">۲ GB Swap</div>
+              <div class="proof-label">تنظیم خودکار روی VPS + میرورهای ایرانی داکر</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Core Capabilities -->
+      <section class="section" id="capabilities">
+        <div class="container">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">هر آنچه از یک PaaS سبک نیاز دارید</h2>
+              <p class="section-sub">
+                بدون پیچیدگی‌های اضافه و بدون مصرف نیمی از رم سرور؛ فقط ابزارهای ضروری برای استقرار،
+                پایش و نگهداری سرویس‌های واقعی.
+              </p>
+            </div>
+          </div>
+
+          <div class="bento-grid">
+            <article class="bento-card span-7">
+              <div class="card-num">۰۱. دیپلوی خودکار از گیتهاب</div>
+              <h3 class="card-title">تشخیص هوشمند مخزن، Webhook و استریم زنده لاگ</h3>
+              <p class="card-desc">
+                کافی است لینک ریپوی Public یا Private را وارد کنید تا سکان به‌طور خودکار
+                <span class="mono">Dockerfile</span> یا <span class="mono">docker-compose.yml</span>،
+                پورت <span class="mono">EXPOSE</span> و کلیدهای <span class="mono">.env.example</span> را
+                شناسایی کند. با GitHub Webhook (امضای HMAC-SHA256) یا Polling دوره‌ای هر پوش جدید
+                به‌صورت خودکار بیلد و روی شبکه داخلی <span class="mono">web</span> جایگزین می‌شود.
+              </p>
+              <div class="card-meta-line">
+                استریم زنده SSE · ورود یکجای .env · رمزنگاری AES-256-GCM · بدون تداخل پورت Host
+              </div>
+            </article>
+
+            <article class="bento-card span-5">
+              <div class="card-num">۰۲. مدیریت زنده Caddy و SSL</div>
+              <h3 class="card-title">کنترل مستقیم Caddyfile با Rollback آنی</h3>
+              <p class="card-desc">
+                برخلاف ابزارهایی که کنترل پروکسی را از شما می‌گیرند، سکان ویرایشگر کامل
+                <span class="mono">Caddyfile</span> را در اختیارتان می‌گذارد. هر تغییر پیش از اعمال با
+                <span class="mono">caddy validate</span> بررسی شده، بدون قطعی Reload می‌شود و در تاریخچه
+                نسخه‌ها ذخیره می‌ماند.
+              </p>
+              <div class="card-meta-line">
+                گواهی SSL خودکار · جلوگیری از دامنه تکراری · بازگشت تک‌کلیکه
+              </div>
+            </article>
+
+            <article class="bento-card span-5">
+              <div class="card-num">۰۳. مدیریت Docker و دیسک</div>
+              <h3 class="card-title">جایگزین سبک Portainer + پاک‌سازی ایمن</h3>
+              <p class="card-desc">
+                مشاهده لیست کانتینرهای سرور، آمار لحظه‌ای مصرف CPU و رم، خواندن لاگ‌ها و کنترل
+                Start/Stop/Restart/Remove مستقیم از داشبورد. به‌علاوه نمایش تفکیکی فضای دیسک داکر و
+                پاک‌سازی یک‌کلیکه ایمیج‌ها و کش بیلد بلااستفاده.
+              </p>
+              <div class="card-meta-line">
+                اتصال مستقیم به docker.sock · docker system df · ایمن برای Volumeها
+              </div>
+            </article>
+
+            <article class="bento-card span-7">
+              <div class="card-num">۰۴. بومی برای VPS ایران و امنیت دولایه</div>
+              <h3 class="card-title">نصب بدون گیر کردن در تحریم + محافظت دولایه</h3>
+              <p class="card-desc">
+                اسکریپت نصب کاملاً انگلیسی <span class="mono">bootstrap-vps.sh</span> داکر را مستقیم از
+                مخزن اوبونتو نصب کرده، میرورهای <span class="mono">docker.arvancloud.ir</span> و
+                <span class="mono">registry.docker.ir</span> را پیکربندی می‌کند و فایروال UFW و Swap را
+                آماده می‌سازد. پنل با دو لایه امنیت (Caddy Basic Auth + کوکی HttpOnly سی‌روزه) محافظت
+                می‌شود.
+              </p>
+              <div class="card-meta-line">
+                بدون وابستگی به Alpine APK · نشست پایدار ۳۰ روزه · بکاپ و بازیابی JSON
+              </div>
+            </article>
+
+            <article class="bento-card span-12">
+              <div class="catalog-header">
+                <div>
+                  <div class="card-num">۰۵. نصب یک‌کلیکه سرویس‌های آماده و دیتابیس‌ها</div>
+                  <h3 class="card-title" style="margin-top: 4px">
+                    کاتالوگ آماده با تولید خودکار رمز عبور و رشته اتصال
+                  </h3>
+                </div>
+                <div class="segmented" role="tablist" aria-label="فیلتر سرویس‌های آماده">
+                  <button type="button" class="seg-btn active" data-cat="all" role="tab" aria-selected="true">
+                    همه (۱۰)
+                  </button>
+                  <button type="button" class="seg-btn" data-cat="database" role="tab" aria-selected="false">
+                    دیتابیس و کش (۴)
+                  </button>
+                  <button type="button" class="seg-btn" data-cat="app" role="tab" aria-selected="false">
+                    اپلیکیشن‌ها (۴)
+                  </button>
+                  <button type="button" class="seg-btn" data-cat="tool" role="tab" aria-selected="false">
+                    ابزارها (۲)
+                  </button>
+                </div>
+              </div>
+              <div class="catalog-list" id="catalog-grid"></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- Resource Usage & Comparison -->
+      <section class="section" id="comparison">
+        <div class="container">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">مصرف منابع و مقایسه با Portainer و Coolify</h2>
+              <p class="section-sub">
+                روی یک VPS دو گیگابایتی، سکان بیش از ۱.۵ گیگابایت رم آزاد برای پروژه‌ها و دیتابیس‌های
+                شما باقی می‌گذارد.
+              </p>
+            </div>
+
+            <div class="segmented" role="tablist" aria-label="نمای جدول مقایسه">
+              <button type="button" class="seg-btn active" data-table="compare" role="tab" aria-selected="true">
+                مقایسه با Portainer و Coolify
+              </button>
+              <button type="button" class="seg-btn" data-table="footprint" role="tab" aria-selected="false">
+                تفکیک مصرف منابع سکان
+              </button>
+            </div>
+          </div>
+
+          <!-- Table 1: Comparison -->
+          <div id="panel-compare">
+            <div class="table-wrap">
+              <table class="tabular">
+                <thead>
+                  <tr>
+                    <th>معیار مقایسه</th>
+                    <th class="col-sokkan">سکان (Sokkan)</th>
+                    <th>Portainer (CE)</th>
+                    <th>Coolify</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>رم پایه در حالت آماده (Idle)</strong></td>
+                    <td class="col-sokkan col-accent">~۸۰ تا ۱۶۵ MB (پنل + Caddy)</td>
+                    <td>~۴۰ تا ۱۰۰ MB (بدون Proxy و CI)</td>
+                    <td>~۷۰۰ MB تا ۱.۴ GB (استک کامل)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>مصرف CPU در حالت آماده</strong></td>
+                    <td class="col-sokkan">&lt; ۱٪</td>
+                    <td>&lt; ۱٪</td>
+                    <td>~۲٪ تا ۵٪</td>
+                  </tr>
+                  <tr>
+                    <td><strong>فضای دیسک اولیه</strong></td>
+                    <td class="col-sokkan">~۴۰۰ MB</td>
+                    <td>~۲۵۰ MB</td>
+                    <td>~۲ تا ۴ GB+</td>
+                  </tr>
+                  <tr>
+                    <td><strong>تعداد کانتینرهای زیرساخت</strong></td>
+                    <td class="col-sokkan">۲ کانتینر (sokkan-panel + caddy)</td>
+                    <td>۱ کانتینر (نیازمند Proxy جداگانه)</td>
+                    <td>۵ تا ۷ کانتینر (App، Postgres، Redis...)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>حداقل VPS پیشنهادی</strong></td>
+                    <td class="col-sokkan col-good">۱ vCPU / ۱–۲ GB RAM</td>
+                    <td>۱ vCPU / ۱ GB RAM</td>
+                    <td>۲ vCPU / ۴ GB RAM (روی ۲GB سریع پر می‌شود)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>دیتابیس داخلی پنل</strong></td>
+                    <td class="col-sokkan">SQLite تک‌فایلی</td>
+                    <td>BoltDB تک‌فایلی</td>
+                    <td>PostgreSQL + Redis جداگانه</td>
+                  </tr>
+                  <tr>
+                    <td><strong>CI/CD خودکار گیتهاب</strong></td>
+                    <td class="col-sokkan col-good">دارد (Webhook + Polling + لاگ زنده)</td>
+                    <td>ندارد (دستی / محدود در نسخه رایگان)</td>
+                    <td>دارد (کامل و چندسروره)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Reverse Proxy و SSL خودکار</strong></td>
+                    <td class="col-sokkan col-good">دارد (Caddy v2 + ویرایشگر زنده + Rollback)</td>
+                    <td>ندارد (نیازمند نصب جداگانه)</td>
+                    <td>دارد (Traefik/Caddy، ویرایش دستی محدود)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>نصب یک‌کلیکه دیتابیس و اپ</strong></td>
+                    <td class="col-sokkan">دارد (۱۰ سرویس پرکاربرد + mem_limit)</td>
+                    <td>قالب دستی / Stack YAML</td>
+                    <td>دارد (کاتالوگ گسترده)</td>
+                  </tr>
+                  <tr>
+                    <td><strong>ابزار خط فرمان (CLI)</strong></td>
+                    <td class="col-sokkan col-good">دارد (sokkan update/status/logs/doctor)</td>
+                    <td>ندارد</td>
+                    <td>محدود</td>
+                  </tr>
+                  <tr>
+                    <td><strong>سازگاری با اینترنت ایران</strong></td>
+                    <td class="col-sokkan col-good">بومی (میرور آروان/Docker.ir، بدون Alpine APK)</td>
+                    <td>متوسط (وابسته به Docker Hub)</td>
+                    <td>دشوار (حساس به تحریم در نصب/بیلد)</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Table 2: Sokkan Resource Footprint -->
+          <div id="panel-footprint" class="hidden">
+            <div class="table-wrap">
+              <table class="tabular">
+                <thead>
+                  <tr>
+                    <th>سرویس / کانتینر</th>
+                    <th>رم تقریبی (Idle)</th>
+                    <th>سقف مجاز (mem_limit)</th>
+                    <th>مصرف CPU (Idle)</th>
+                    <th>نقش در استک</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="mono"><strong>sokkan-panel</strong></td>
+                    <td class="col-accent">~۶۰ تا ۱۲۰ MB</td>
+                    <td class="mono">300m</td>
+                    <td>&lt; ۱٪</td>
+                    <td>پنل وب، API، CI/CD و SQLite تک‌فایلی</td>
+                  </tr>
+                  <tr>
+                    <td class="mono"><strong>caddy</strong></td>
+                    <td class="col-accent">~۲۰ تا ۴۵ MB</td>
+                    <td class="mono">150m</td>
+                    <td>~۰٪</td>
+                    <td>Reverse Proxy، SSL خودکار و Basic Auth لایه اول</td>
+                  </tr>
+                  <tr>
+                    <td><strong>مجموع استک پایه (۲ کانتینر)</strong></td>
+                    <td class="col-good"><strong>~۸۰ تا ۱۶۵ MB</strong></td>
+                    <td class="mono"><strong>450m</strong></td>
+                    <td><strong>&lt; ۱٪</strong></td>
+                    <td>فضای دیسک اولیه: ~۳۵۰ تا ۵۰۰ MB</td>
+                  </tr>
+                  <tr>
+                    <td class="mono">beszel + beszel-agent (اختیاری)</td>
+                    <td>~۴۰ تا ۷۰ MB</td>
+                    <td class="mono">200m + 100m</td>
+                    <td>&lt; ۱٪</td>
+                    <td>مانیتورینگ و نمودار تاریخچه سرور</td>
+                  </tr>
+                  <tr>
+                    <td class="mono">uptime-kuma (اختیاری)</td>
+                    <td>~۸۰ تا ۱۵۰ MB</td>
+                    <td class="mono">250m</td>
+                    <td>&lt; ۱٪</td>
+                    <td>پایش آپتایم سایت‌ها و صفحه وضعیت</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="table-note">
+              در زمان اجرای <span class="mono">docker build</span> برای پروژه‌های سنگین‌تر (مانند
+              Next.js)، مصرف رم موقتاً افزایش می‌یابد؛ اسکریپت نصب سکان به‌طور خودکار ۲ گیگابایت Swap
+              فعال می‌کند تا VPSهای ۱ تا ۲ گیگابایتی بدون خطای OOM بیلد بگیرند.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Install & CLI -->
+      <section class="section" id="install">
+        <div class="container">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">نصب سریع و ابزار خط فرمان سکان</h2>
+              <p class="section-sub">
+                اسکریپت نصب کاملاً انگلیسی است و روی Ubuntu / Debian به‌طور خودکار داکر، میرورهای
+                ایرانی، فایروال، Swap، Caddy و دستور سراسری <span class="mono">sokkan</span> را آماده
+                می‌کند.
+              </p>
+            </div>
+          </div>
+
+          <div class="install-grid">
+            <div>
+              <div class="code-block">
+                <div class="code-block-head">
+                  <span>۱. نصب صفر تا صد روی VPS جدید</span>
+                  <button type="button" class="copy-btn" data-copy-target="cmd-install">کپی</button>
+                </div>
+                <pre class="mono" id="cmd-install">sudo apt-get update && sudo apt-get install -y git
+sudo git clone https://github.com/ebad84/sokkan-yar.git /opt/sokkan
+cd /opt/sokkan
+chmod +x bootstrap-vps.sh
+sudo bash bootstrap-vps.sh</pre>
+              </div>
+
+              <div class="code-block" style="margin-top: 20px">
+                <div class="code-block-head">
+                  <span>۲. آپدیت به آخرین نسخه در آینده</span>
+                  <button type="button" class="copy-btn" data-copy-target="cmd-update">کپی</button>
+                </div>
+                <pre class="mono" id="cmd-update">sokkan update</pre>
+              </div>
+            </div>
+
+            <div class="cli-list" id="cli">
+              <div class="cli-row">
+                <span class="cli-cmd mono">sokkan status</span>
+                <span class="cli-desc">وضعیت سرویس‌ها و مصرف لحظه‌ای رم و CPU</span>
+              </div>
+              <div class="cli-row">
+                <span class="cli-cmd mono">sokkan update</span>
+                <span class="cli-desc">دریافت آخرین نسخه از گیت و بیلد مجدد پنل</span>
+              </div>
+              <div class="cli-row">
+                <span class="cli-cmd mono">sokkan logs [service]</span>
+                <span class="cli-desc">مشاهده لاگ زنده پنل یا کانتینر Caddy</span>
+              </div>
+              <div class="cli-row">
+                <span class="cli-cmd mono">sokkan reload-caddy</span>
+                <span class="cli-desc">اعتبارسنجی و Reload بدون قطعی Caddyfile</span>
+              </div>
+              <div class="cli-row">
+                <span class="cli-cmd mono">sokkan prune</span>
+                <span class="cli-desc">پاک‌سازی ایمن ایمیج‌ها و کش بیلد قدیمی</span>
+              </div>
+              <div class="cli-row">
+                <span class="cli-cmd mono">sokkan backup</span>
+                <span class="cli-desc">تهیه آرشیو فشرده از data/، caddy/ و .env</span>
+              </div>
+              <div class="cli-row">
+                <span class="cli-cmd mono">sokkan hash-password</span>
+                <span class="cli-desc">ساخت هش bcrypt برای Basic Auth در Caddy</span>
+              </div>
+              <div class="cli-row">
+                <span class="cli-cmd mono">sokkan doctor</span>
+                <span class="cli-desc">عیب‌یابی سلامت داکر، شبکه web، Swap و Caddy</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer-inner">
+        <div class="brand" style="font-size: 15px">
+          <img
+            src="./sokkan-logo.svg"
+            alt="لوگوی سکان"
+            style="width: 24px; height: 24px; border: none"
+          />
+          <span>سکان (Sokkan) — پلتفرم سبک PaaS و CI/CD خودمیزبان</span>
+        </div>
+
+        <div class="footer-links">
+          <a href="https://github.com/ebad84/sokkan-yar" target="_blank" rel="noopener noreferrer">
+            مخزن گیتهاب
+          </a>
+          <a
+            href="https://github.com/ebad84/sokkan-yar/blob/main/README.md"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            README
+          </a>
+          <a
+            href="https://github.com/ebad84/sokkan-yar/blob/main/DOCS.md"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            مستند معماری (DOCS)
+          </a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var TERMINAL_PRESETS = {
+          install: {
+            copy:
+              'sudo git clone https://github.com/ebad84/sokkan-yar.git /opt/sokkan && cd /opt/sokkan && sudo bash bootstrap-vps.sh',
+            html:
+              '<span class="t-prompt">$</span> sudo git clone https://github.com/ebad84/sokkan-yar.git /opt/sokkan\n' +
+              '<span class="t-prompt">$</span> cd /opt/sokkan && sudo bash bootstrap-vps.sh\n\n' +
+              '<span class="t-muted">[1/7]</span> Installing docker.io & docker-compose-v2...\n' +
+              '<span class="t-muted">[2/7]</span> Configuring Iranian Docker registry mirrors...\n' +
+              '<span class="t-muted">[3/7]</span> Enabling 2G swapfile & UFW firewall (22, 80, 443)...\n' +
+              '<span class="t-muted">[6/7]</span> Installing global CLI to /usr/local/bin/sokkan...\n' +
+              '<span class="t-ok">OK: Sokkan stack is live on https://sokkan.example.com</span>',
+          },
+          status: {
+            copy: 'sokkan status',
+            html:
+              '<span class="t-prompt">$</span> sokkan status\n' +
+              '<span class="t-muted">NAME           STATUS          MEM USAGE / LIMIT    CPU %</span>\n' +
+              'sokkan-panel   Up 14 days      88.4MiB / 300MiB     0.18%\n' +
+              'caddy          Up 14 days      26.1MiB / 150MiB     0.04%\n' +
+              'beszel         Up 14 days      34.0MiB / 200MiB     0.09%\n' +
+              '<span class="t-ok">Total stack RAM: ~148 MiB (1.85 GiB free on 2GB VPS)</span>',
+          },
+          update: {
+            copy: 'sokkan update',
+            html:
+              '<span class="t-prompt">$</span> sokkan update\n' +
+              '<span class="t-muted">==> Updating Sokkan in /opt/sokkan</span>\n' +
+              'Updating a49bb4d..934f944 (Fast-forward)\n' +
+              'Building sokkan-panel...\n' +
+              'Container sokkan-panel  Started\n' +
+              '<span class="t-ok">Sokkan updated successfully.</span>',
+          },
+          doctor: {
+            copy: 'sokkan doctor',
+            html:
+              '<span class="t-prompt">$</span> sokkan doctor\n' +
+              'Install dir : /opt/sokkan\n' +
+              '<span class="t-ok">[OK]</span> Docker daemon running\n' +
+              '<span class="t-ok">[OK]</span> Docker network "web" exists\n' +
+              '<span class="t-ok">[OK]</span> Caddyfile syntax valid\n' +
+              '<span class="t-ok">[OK]</span> 2048 MB swap active',
+          },
+        };
+
+        var CATALOG_ITEMS = [
+          { name: 'PostgreSQL 16', meta: 'دیتابیس رابطه‌ای · 256MB سقف رم', cat: 'database' },
+          { name: 'Redis 7', meta: 'کش و صف پیام · 128MB سقف رم', cat: 'database' },
+          { name: 'MariaDB 11', meta: 'سازگار با MySQL · 256MB سقف رم', cat: 'database' },
+          { name: 'MongoDB 7', meta: 'دیتابیس NoSQL · 300MB سقف رم', cat: 'database' },
+          { name: 'n8n', meta: 'اتوماسیون ورک‌فلو · SSL خودکار', cat: 'app' },
+          { name: 'Uptime Kuma', meta: 'مانیتورینگ آپتایم · SSL خودکار', cat: 'app' },
+          { name: 'MinIO (S3)', meta: 'ذخیره‌سازی آبجکت · SSL خودکار', cat: 'app' },
+          { name: 'Memos', meta: 'یادداشت‌برداری سبک · زیر 50MB رم', cat: 'app' },
+          { name: 'Vaultwarden', meta: 'مدیریت رمز عبور · سازگار با Bitwarden', cat: 'tool' },
+          { name: 'Adminer', meta: 'پنل وب دیتابیس · زیر 40MB رم', cat: 'tool' },
+        ];
+
+        var activeTerm = 'install';
+        var termEl = document.getElementById('hero-terminal');
+        var heroCopyBtn = document.getElementById('hero-copy-btn');
+
+        function renderTerminal(key) {
+          activeTerm = key;
+          termEl.innerHTML = TERMINAL_PRESETS[key].html;
+          document.querySelectorAll('.terminal-tab').forEach(function (btn) {
+            var isMatch = btn.getAttribute('data-term') === key;
+            btn.classList.toggle('active', isMatch);
+            btn.setAttribute('aria-selected', isMatch ? 'true' : 'false');
+          });
+        }
+
+        document.querySelectorAll('.terminal-tab').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            renderTerminal(btn.getAttribute('data-term'));
+          });
+        });
+
+        function copyText(text, btn, originalLabel) {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+              btn.textContent = 'کپی شد';
+              setTimeout(function () {
+                btn.textContent = originalLabel;
+              }, 1600);
+            });
+          }
+        }
+
+        heroCopyBtn.addEventListener('click', function () {
+          copyText(TERMINAL_PRESETS[activeTerm].copy, heroCopyBtn, 'کپی دستور');
+        });
+
+        document.querySelectorAll('[data-copy-target]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var targetId = btn.getAttribute('data-copy-target');
+            var el = document.getElementById(targetId);
+            if (el) {
+              copyText(el.textContent.trim(), btn, 'کپی');
+            }
+          });
+        });
+
+        // One-Click Catalog Filter
+        var catalogGrid = document.getElementById('catalog-grid');
+        function renderCatalog(cat) {
+          var filtered =
+            cat === 'all'
+              ? CATALOG_ITEMS
+              : CATALOG_ITEMS.filter(function (item) {
+                  return item.cat === cat;
+                });
+          catalogGrid.innerHTML = filtered
+            .map(function (item) {
+              return (
+                '<div class="catalog-item">' +
+                '<div class="catalog-item-name">' +
+                item.name +
+                '</div>' +
+                '<div class="catalog-item-meta">' +
+                item.meta +
+                '</div>' +
+                '</div>'
+              );
+            })
+            .join('');
+          document.querySelectorAll('[data-cat]').forEach(function (btn) {
+            var isMatch = btn.getAttribute('data-cat') === cat;
+            btn.classList.toggle('active', isMatch);
+            btn.setAttribute('aria-selected', isMatch ? 'true' : 'false');
+          });
+        }
+
+        document.querySelectorAll('[data-cat]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            renderCatalog(btn.getAttribute('data-cat'));
+          });
+        });
+
+        // Comparison vs Footprint Switcher
+        var panelCompare = document.getElementById('panel-compare');
+        var panelFootprint = document.getElementById('panel-footprint');
+        document.querySelectorAll('[data-table]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var target = btn.getAttribute('data-table');
+            panelCompare.classList.toggle('hidden', target !== 'compare');
+            panelFootprint.classList.toggle('hidden', target !== 'footprint');
+            document.querySelectorAll('[data-table]').forEach(function (b) {
+              var active = b.getAttribute('data-table') === target;
+              b.classList.toggle('active', active);
+              b.setAttribute('aria-selected', active ? 'true' : 'false');
+            });
+          });
+        });
+
+        renderTerminal('install');
+        renderCatalog('all');
+      })();
+    </script>
+  </body>
+</html>
