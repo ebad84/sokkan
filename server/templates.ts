@@ -3,8 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { decryptSecret, generateRandomHex } from './crypto.ts';
-import { getDataDir, type ServiceRow } from './db.ts';
-import { ensureDockerNetwork, isDockerAvailable, performContainerAction } from './docker.ts';
+import { getDataDir, getResourcePrivateNetworks, type ServiceRow } from './db.ts';
+import {
+  connectContainerToNetwork,
+  ensureDockerNetwork,
+  isDockerAvailable,
+  performContainerAction,
+} from './docker.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -346,6 +351,14 @@ export function serializeService(row: ServiceRow) {
     envMap = {};
   }
   const { internalHost, connectionUrl } = buildConnectionSummary(row, envMap);
+  const networks = getResourcePrivateNetworks('service', row.id, row.private_network_id).map((n) => ({
+    id: n.id,
+    name: n.name,
+    slug: n.slug,
+    dockerName: n.docker_name,
+    internalOnly: n.internal_only === 1,
+  }));
+
   return {
     id: row.id,
     templateId: row.template_id,
@@ -363,6 +376,9 @@ export function serializeService(row: ServiceRow) {
     connectionUrl,
     status: row.status,
     lastMessage: row.last_message,
+    ownerUserId: row.owner_user_id,
+    privateNetworkId: row.private_network_id,
+    networks,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -374,7 +390,14 @@ export async function deployServiceInstance(row: ServiceRow): Promise<{
   message: string;
 }> {
   const containerName = `sokkan-${row.slug}`;
-  const dockerNetwork = process.env.DOCKER_NETWORK?.trim() || 'web';
+  const privateNets = getResourcePrivateNetworks('service', row.id, row.private_network_id);
+  const fallbackNetwork = process.env.DOCKER_NETWORK?.trim() || 'web';
+  const primaryNetwork = privateNets[0]?.docker_name || fallbackNetwork;
+  const networkLabel =
+    privateNets.length > 0
+      ? privateNets.map((n) => `${n.name} (${n.docker_name})`).join('، ')
+      : fallbackNetwork;
+
   const envMap = JSON.parse(decryptSecret(row.env_vars_enc) || '{}') as Record<string, string>;
   const volumes = JSON.parse(row.volumes_json || '[]') as Array<{ name: string; mountPath: string }>;
   const cmdArgs = JSON.parse(row.command_json || '[]') as string[];
@@ -384,12 +407,22 @@ export async function deployServiceInstance(row: ServiceRow): Promise<{
     return {
       executionMode: 'sandbox',
       status: 'running',
-      message: `ثبت شد (حالت پیش‌نمایش بدون داکر) — روی VPS کانتینر ${containerName} با ایمیج ${row.image} روی شبکه ${dockerNetwork} اجرا می‌شود.`,
+      message: `ثبت شد (حالت پیش‌نمایش بدون داکر) — روی VPS کانتینر ${containerName} (نام میزبان جایگزین: ${row.slug}) با ایمیج ${row.image} روی شبکه ${networkLabel} اجرا می‌شود.`,
     };
   }
 
   try {
-    await ensureDockerNetwork(dockerNetwork);
+    if (privateNets.length > 0) {
+      for (const net of privateNets) {
+        await ensureDockerNetwork(net.docker_name, {
+          internal: net.internal_only === 1,
+          subnet: net.subnet || undefined,
+          ownerUserId: net.owner_user_id,
+        });
+      }
+    } else {
+      await ensureDockerNetwork(fallbackNetwork);
+    }
 
     // Pull latest requested tag (uses Iranian registry mirrors configured in daemon.json)
     await execFileAsync('docker', ['pull', row.image], { timeout: 180_000 });
@@ -404,8 +437,11 @@ export async function deployServiceInstance(row: ServiceRow): Promise<{
     const envFilePath = path.join(envDir, `${row.slug}.env`);
     const envEntries = Object.entries(envMap).filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));
     if (envEntries.length > 0) {
-      const content = envEntries.map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+      const content =
+        envEntries.map(([k, v]) => `${k}=${String(v).replace(/[\r\n]+/g, ' ')}`).join('\n') + '\n';
       fs.writeFileSync(envFilePath, content, { mode: 0o600 });
+    } else if (fs.existsSync(envFilePath)) {
+      fs.unlinkSync(envFilePath);
     }
 
     const runArgs: string[] = [
@@ -414,7 +450,9 @@ export async function deployServiceInstance(row: ServiceRow): Promise<{
       '--name',
       containerName,
       '--network',
-      dockerNetwork,
+      primaryNetwork,
+      '--network-alias',
+      row.slug,
       '--restart',
       'unless-stopped',
       '--memory',
@@ -425,6 +463,8 @@ export async function deployServiceInstance(row: ServiceRow): Promise<{
       `sokkan.service=${row.slug}`,
       '--label',
       `sokkan.template=${row.template_id}`,
+      '--label',
+      `sokkan.owner=${row.owner_user_id}`,
     ];
 
     for (const vol of volumes) {
@@ -440,10 +480,14 @@ export async function deployServiceInstance(row: ServiceRow): Promise<{
 
     await execFileAsync('docker', runArgs, { timeout: 30_000 });
 
+    for (const extraNet of privateNets.slice(1)) {
+      await connectContainerToNetwork(containerName, extraNet.docker_name, [row.slug]);
+    }
+
     return {
       executionMode: 'vps',
       status: 'running',
-      message: `سرویس ${containerName} با موفقیت روی شبکه ${dockerNetwork} راه‌اندازی شد.`,
+      message: `سرویس ${containerName} با موفقیت روی شبکه ${networkLabel} راه‌اندازی شد.`,
     };
   } catch (err) {
     const errObj = err as { stderr?: string; message?: string };

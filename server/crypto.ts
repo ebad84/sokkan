@@ -46,6 +46,8 @@ export function verifyPlainPasscode(input: string, envPasscode: string): boolean
 }
 
 export interface SessionPayload {
+  userId?: string;
+  username?: string;
   role: string;
   exp: number;
 }
@@ -153,3 +155,89 @@ export function verifyGitHubSignature(
 export function generateRandomHex(bytes = 24): string {
   return crypto.randomBytes(bytes).toString('hex');
 }
+
+export interface EncryptedBackupEnvelope {
+  encrypted: true;
+  format: 'sokkan-backup-enc-v1';
+  schemaVersion: 2;
+  exportedAt: string;
+  kdf: 'scrypt';
+  cipher: 'aes-256-gcm';
+  salt: string;
+  iv: string;
+  tag: string;
+  ciphertext: string;
+}
+
+export function isEncryptedBackupEnvelope(value: unknown): value is EncryptedBackupEnvelope {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    v.encrypted === true &&
+    v.format === 'sokkan-backup-enc-v1' &&
+    typeof v.salt === 'string' &&
+    typeof v.iv === 'string' &&
+    typeof v.tag === 'string' &&
+    typeof v.ciphertext === 'string'
+  );
+}
+
+export function encryptBackupPayload(
+  payload: Record<string, unknown>,
+  passphrase: string,
+): EncryptedBackupEnvelope {
+  const cleanPass = passphrase.trim();
+  if (cleanPass.length < 6) {
+    throw new Error('رمز رمزنگاری فایل پشتیبان باید حداقل ۶ کاراکتر باشد.');
+  }
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = crypto.scryptSync(cleanPass, salt, 32, { N: 16384, r: 8, p: 1 });
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const plaintext = JSON.stringify(payload);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    encrypted: true,
+    format: 'sokkan-backup-enc-v1',
+    schemaVersion: 2,
+    exportedAt: String(payload.exportedAt || new Date().toISOString()),
+    kdf: 'scrypt',
+    cipher: 'aes-256-gcm',
+    salt: salt.toString('hex'),
+    iv: iv.toString('hex'),
+    tag: tag.toString('hex'),
+    ciphertext: encrypted.toString('base64'),
+  };
+}
+
+export function decryptBackupPayload(
+  envelope: EncryptedBackupEnvelope,
+  passphrase: string,
+): Record<string, unknown> {
+  const cleanPass = passphrase.trim();
+  if (!cleanPass) {
+    throw new Error('این فایل پشتیبان رمزنگاری شده است. لطفاً رمز بازگشایی بکاپ را وارد کنید.');
+  }
+  try {
+    const salt = Buffer.from(envelope.salt, 'hex');
+    const iv = Buffer.from(envelope.iv, 'hex');
+    const tag = Buffer.from(envelope.tag, 'hex');
+    const ciphertext = Buffer.from(envelope.ciphertext, 'base64');
+    const key = crypto.scryptSync(cleanPass, salt, 32, { N: 16384, r: 8, p: 1 });
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+    const parsed = JSON.parse(decrypted) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('ساختار داخلی فایل بکاپ نامعتبر است.');
+    }
+    return parsed as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('ساختار داخلی')) {
+      throw err;
+    }
+    throw new Error('رمز بازگشایی فایل پشتیبان نادرست است یا فایل آسیب دیده است.');
+  }
+}
+

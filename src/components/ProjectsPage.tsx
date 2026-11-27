@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiFetch, streamDeploymentLogs } from '../api';
-import type { Deployment, GitHubInspectionResult, Project } from '../types';
+import type { Deployment, GitHubInspectionResult, PrivateNetwork, Project } from '../types';
 
 function extractRepoNameFromUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
@@ -197,6 +197,8 @@ export function DeploymentDrawer({
 interface ProjectsPageProps {
   projects: Project[];
   deployments: Deployment[];
+  networks: PrivateNetwork[];
+  isAdmin: boolean;
   openAddModalTrigger: number;
   onRefresh: () => void;
   onInspectDeployment: (deploymentId: string) => void;
@@ -205,6 +207,8 @@ interface ProjectsPageProps {
 export function ProjectsPage({
   projects,
   deployments,
+  networks,
+  isAdmin,
   openAddModalTrigger,
   onRefresh,
   onInspectDeployment,
@@ -233,6 +237,7 @@ export function ProjectsPage({
   const [buildFilePath, setBuildFilePath] = useState('Dockerfile');
   const [containerPort, setContainerPort] = useState(3000);
   const [domain, setDomain] = useState('');
+  const [privateNetworkId, setPrivateNetworkId] = useState('');
   const [caddyEnabled, setCaddyEnabled] = useState(true);
   const [autoDeployWebhook, setAutoDeployWebhook] = useState(true);
   const [pollingIntervalSec, setPollingIntervalSec] = useState(300);
@@ -251,6 +256,7 @@ export function ProjectsPage({
   const [editDomain, setEditDomain] = useState('');
   const [editPort, setEditPort] = useState(3000);
   const [editBranch, setEditBranch] = useState('main');
+  const [editPrivateNetworkId, setEditPrivateNetworkId] = useState('');
   const [editPolling, setEditPolling] = useState(300);
   const [editWebhook, setEditWebhook] = useState(true);
   const [editCaddyEnabled, setEditCaddyEnabled] = useState(true);
@@ -262,6 +268,7 @@ export function ProjectsPage({
   const [showBulkEnvAdd, setShowBulkEnvAdd] = useState(false);
   const [bulkEnvAddText, setBulkEnvAddText] = useState('');
   const [editRotatedSecret, setEditRotatedSecret] = useState('');
+  const [editError, setEditError] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
 
   useEffect(() => {
@@ -324,6 +331,7 @@ export function ProjectsPage({
     setBuildFilePath('Dockerfile');
     setContainerPort(3000);
     setDomain('');
+    setPrivateNetworkId('');
     setCaddyEnabled(true);
     setAutoDeployWebhook(true);
     setPollingIntervalSec(300);
@@ -342,7 +350,11 @@ export function ProjectsPage({
         }
       }
 
-      const res = await apiFetch<{ project: Project; generatedWebhookSecret: string }>(
+      const res = await apiFetch<{
+        project: Project;
+        generatedWebhookSecret: string;
+        caddyWarning?: string;
+      }>(
         '/api/projects',
         {
           method: 'POST',
@@ -355,6 +367,7 @@ export function ProjectsPage({
             buildFilePath,
             containerPort,
             domain,
+            privateNetworkId: privateNetworkId || null,
             caddyEnabled,
             autoDeployWebhook,
             pollingIntervalSec,
@@ -368,6 +381,9 @@ export function ProjectsPage({
 
       setShowAddModal(false);
       resetAddForm();
+      if (res.caddyWarning) {
+        setActionError(`پروژه ثبت شد اما هشدار Caddy رخ داد: ${res.caddyWarning}`);
+      }
       setCreatedWebhookInfo({
         projectId: res.project.id,
         projectName: res.project.name,
@@ -413,6 +429,7 @@ export function ProjectsPage({
     setEditDomain(p.domain);
     setEditPort(p.containerPort);
     setEditBranch(p.branch);
+    setEditPrivateNetworkId(p.privateNetworkId ?? '');
     setEditPolling(p.pollingIntervalSec);
     setEditWebhook(p.autoDeployWebhook);
     setEditCaddyEnabled(p.caddyEnabled);
@@ -422,12 +439,14 @@ export function ProjectsPage({
     setEditBulkEnv('');
     setEditDeletedEnvKeys([]);
     setEditRotatedSecret('');
+    setEditError('');
   };
 
   const handleSaveEdit = async (e: FormEvent) => {
     e.preventDefault();
     if (!editingProject) return;
     setSavingEdit(true);
+    setEditError('');
     setActionError('');
     try {
       const envUpdate: Record<string, string | null> = {};
@@ -441,23 +460,30 @@ export function ProjectsPage({
         envUpdate[editEnvKey.trim()] = editEnvVal;
       }
 
-      await apiFetch(`/api/projects/${encodeURIComponent(editingProject.id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          domain: editDomain,
-          containerPort: editPort,
-          branch: editBranch,
-          pollingIntervalSec: editPolling,
-          autoDeployWebhook: editWebhook,
-          caddyEnabled: editCaddyEnabled,
-          caddyExtraDirectives: editExtraDirectives,
-          envVars: Object.keys(envUpdate).length > 0 ? envUpdate : undefined,
-        }),
-      });
+      const updated = await apiFetch<Project & { caddyWarning?: string }>(
+        `/api/projects/${encodeURIComponent(editingProject.id)}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            domain: editDomain,
+            containerPort: editPort,
+            branch: editBranch,
+            privateNetworkId: editPrivateNetworkId || null,
+            pollingIntervalSec: editPolling,
+            autoDeployWebhook: editWebhook,
+            caddyEnabled: editCaddyEnabled,
+            ...(isAdmin ? { caddyExtraDirectives: editExtraDirectives } : {}),
+            envVars: Object.keys(envUpdate).length > 0 ? envUpdate : undefined,
+          }),
+        },
+      );
+      if (updated.caddyWarning) {
+        setActionError(`تنظیمات پروژه ذخیره شد اما هشدار Caddy رخ داد: ${updated.caddyWarning}`);
+      }
       setEditingProject(null);
       onRefresh();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'خطا در ذخیره تغییرات');
+      setEditError(err instanceof Error ? err.message : 'خطا در ذخیره تغییرات');
     } finally {
       setSavingEdit(false);
     }
@@ -465,6 +491,7 @@ export function ProjectsPage({
 
   const handleRotateSecret = async () => {
     if (!editingProject) return;
+    setEditError('');
     try {
       const res = await apiFetch<{ webhookSecret: string }>(
         `/api/projects/${encodeURIComponent(editingProject.id)}/rotate-webhook`,
@@ -472,7 +499,7 @@ export function ProjectsPage({
       );
       setEditRotatedSecret(res.webhookSecret);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'خطا در تولید کلید جدید');
+      setEditError(err instanceof Error ? err.message : 'خطا در تولید کلید جدید');
     }
   };
 
@@ -692,6 +719,14 @@ export function ProjectsPage({
                           <span className="tabular-nums">{p.envKeys.length} متغیر Env</span>
                         </>
                       )}
+                      {p.networks && p.networks.length > 0 && (
+                        <>
+                          <span>·</span>
+                          <span className="text-sky-400">
+                            شبکه خصوصی: {p.networks.map((n) => n.name).join('، ')}
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
 
@@ -727,13 +762,22 @@ export function ProjectsPage({
                     </button>
 
                     {confirmDeleteId === p.id ? (
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteProject(p.id)}
-                        className="px-3 py-2 text-xs font-medium bg-red-500 text-white rounded-lg cursor-pointer whitespace-nowrap"
-                      >
-                        تایید حذف
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteProject(p.id)}
+                          className="px-3 py-2 text-xs font-medium bg-red-500 text-white rounded-lg cursor-pointer whitespace-nowrap"
+                        >
+                          تایید حذف
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="px-2.5 py-2 text-xs font-medium text-slate-300 bg-[#0B0F17] border border-[#1F2937] rounded-lg cursor-pointer whitespace-nowrap"
+                        >
+                          انصراف
+                        </button>
+                      </div>
                     ) : (
                       <button
                         type="button"
@@ -942,6 +986,21 @@ export function ProjectsPage({
                     <option value={0}>غیرفعال (فقط Webhook یا دستی)</option>
                   </select>
                 </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-slate-300 mb-1">شبکه خصوصی اجرایی (اختیاری)</label>
+                  <select
+                    value={privateNetworkId}
+                    onChange={(e) => setPrivateNetworkId(e.target.value)}
+                    className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="">شبکه پیش‌فرض سرور (web)</option>
+                    {networks.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {n.name} ({n.dockerName})
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
                   <input
                     type="checkbox"
@@ -1087,6 +1146,11 @@ export function ProjectsPage({
             </div>
 
             <form onSubmit={handleSaveEdit} className="p-6 overflow-y-auto space-y-4 text-xs">
+              {editError && (
+                <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-3.5 py-2.5 text-red-400">
+                  {editError}
+                </div>
+              )}
               <div className="bg-[#0B0F17] border border-[#1F2937] rounded-lg p-3.5 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-medium text-slate-200">آدرس Webhook گیتهاب</span>
@@ -1152,17 +1216,35 @@ export function ProjectsPage({
               </div>
 
               <div>
-                <label className="block text-slate-300 mb-1">
-                  دستورالعمل‌های اضافه داخل بلوک Caddy این پروژه (اختیاری)
-                </label>
-                <textarea
-                  rows={3}
-                  value={editExtraDirectives}
-                  onChange={(e) => setEditExtraDirectives(e.target.value)}
-                  placeholder="header Strict-Transport-Security max-age=31536000;"
-                  className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg p-3 text-slate-100 font-mono"
-                />
+                <label className="block text-slate-300 mb-1">شبکه خصوصی اصلی پروژه</label>
+                <select
+                  value={editPrivateNetworkId}
+                  onChange={(e) => setEditPrivateNetworkId(e.target.value)}
+                  className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-sky-500"
+                >
+                  <option value="">شبکه پیش‌فرض سرور (web)</option>
+                  {networks.map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {n.name} ({n.dockerName})
+                    </option>
+                  ))}
+                </select>
               </div>
+
+              {isAdmin && (
+                <div>
+                  <label className="block text-slate-300 mb-1">
+                    دستورالعمل‌های اضافه داخل بلوک Caddy این پروژه (مخصوص مدیر کل)
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={editExtraDirectives}
+                    onChange={(e) => setEditExtraDirectives(e.target.value)}
+                    placeholder="header Strict-Transport-Security max-age=31536000;"
+                    className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg p-3 text-slate-100 font-mono"
+                  />
+                </div>
+              )}
 
               <div className="flex items-center gap-6">
                 <label className="flex items-center gap-2 text-slate-300 cursor-pointer">

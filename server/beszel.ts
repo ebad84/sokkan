@@ -40,9 +40,19 @@ export function validateBeszelUrl(rawUrl: string): string {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error('پروتکل آدرس Beszel باید http یا https باشد.');
   }
-  // Block cloud metadata endpoints
-  if (parsed.hostname === '169.254.169.254' || parsed.hostname === 'metadata.google.internal') {
-    throw new Error('دسترسی به آدرس متادیتا مجاز نیست.');
+  // Block cloud metadata & link-local endpoints (IPv4 and IPv6)
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    host === 'metadata.google.internal' ||
+    host === 'metadata.goog' ||
+    host === 'metadata.azure.com' ||
+    host === '169.254.169.254' ||
+    host.startsWith('169.254.') ||
+    host.startsWith('::ffff:169.254.') ||
+    host.startsWith('fe80:') ||
+    host === 'fd00:ec2::254'
+  ) {
+    throw new Error('دسترسی به آدرس متادیتا یا لینک-لوکال مجاز نیست.');
   }
   return parsed.toString().replace(/\/+$/, '');
 }
@@ -76,6 +86,36 @@ export function saveBeszelConfig(input: {
   return getBeszelConfigPublic();
 }
 
+export function getBeszelConfigForBackup(): {
+  enabled: boolean;
+  url: string;
+  email: string;
+  password: string;
+} {
+  return {
+    enabled: getSetting('beszel_enabled') === '1',
+    url: getSetting('beszel_url') ?? '',
+    email: getSetting('beszel_email') ?? '',
+    password: decryptSecret(getSetting('beszel_password_enc')),
+  };
+}
+
+export function restoreBeszelConfigFromBackup(input: {
+  enabled?: boolean;
+  url?: string;
+  email?: string;
+  password?: string;
+}): void {
+  const rawUrl = typeof input.url === 'string' ? input.url.trim() : '';
+  const cleanUrl = rawUrl ? validateBeszelUrl(rawUrl) : '';
+  setSetting('beszel_enabled', input.enabled ? '1' : '0');
+  setSetting('beszel_url', cleanUrl);
+  setSetting('beszel_email', typeof input.email === 'string' ? input.email.trim() : '');
+  if (typeof input.password === 'string' && input.password.length > 0) {
+    setSetting('beszel_password_enc', encryptSecret(input.password));
+  }
+}
+
 async function authenticateBeszel(baseUrl: string, email: string, password: string): Promise<string> {
   const endpoints = [
     `${baseUrl}/api/collections/users/auth-with-password`,
@@ -87,6 +127,7 @@ async function authenticateBeszel(baseUrl: string, email: string, password: stri
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ identity: email, password }),
+      signal: AbortSignal.timeout(8000),
     });
     if (res.ok) {
       const data = (await res.json()) as { token?: string };
@@ -118,7 +159,10 @@ export async function fetchBeszelTelemetry(): Promise<{
     const token = await authenticateBeszel(cleanUrl, email, password);
     const headers = { Authorization: token };
 
-    const sysRes = await fetch(`${cleanUrl}/api/collections/systems/records?perPage=20`, { headers });
+    const sysRes = await fetch(`${cleanUrl}/api/collections/systems/records?perPage=20`, {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
     if (!sysRes.ok) {
       throw new Error(`خطای دریافت سیستم‌ها از Beszel (${sysRes.status})`);
     }
@@ -150,7 +194,7 @@ export async function fetchBeszelTelemetry(): Promise<{
       const primaryId = encodeURIComponent(systems[0].id);
       const statsRes = await fetch(
         `${cleanUrl}/api/collections/system_stats/records?filter=(system='${primaryId}')&sort=-created&perPage=30`,
-        { headers },
+        { headers, signal: AbortSignal.timeout(8000) },
       );
       if (statsRes.ok) {
         const statsData = (await statsRes.json()) as {

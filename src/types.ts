@@ -1,8 +1,104 @@
+export interface AuthUser {
+  id: string;
+  username: string;
+  displayName: string;
+  role: 'admin' | 'member';
+}
+
 export interface AuthStatus {
   authenticated: boolean;
   needsSetup: boolean;
   envPasscodeActive: boolean;
   caddyUser?: string;
+  user?: AuthUser;
+}
+
+export interface NetworkRef {
+  id: string;
+  name: string;
+  slug: string;
+  dockerName: string;
+  internalOnly: boolean;
+}
+
+export interface PanelUser {
+  id: string;
+  username: string;
+  displayName: string;
+  role: 'admin' | 'member';
+  isActive: boolean;
+  networksCount: number;
+  projectsCount: number;
+  servicesCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PrivateNetworkProjectMember {
+  id: string;
+  name: string;
+  slug: string;
+  containerName: string;
+  containerPort: number;
+  domain: string;
+  caddyEnabled: boolean;
+  status: string;
+  internalHost: string;
+  aliasHost: string;
+  ipv4Address: string | null;
+  isPrimaryNetwork: boolean;
+}
+
+export interface PrivateNetworkServiceMember {
+  id: string;
+  templateId: string;
+  name: string;
+  slug: string;
+  category: 'database' | 'app' | 'tool';
+  containerName: string;
+  containerPort: number;
+  domain: string;
+  caddyEnabled: boolean;
+  status: string;
+  internalHost: string;
+  aliasHost: string;
+  connectionUrl: string;
+  ipv4Address: string | null;
+  isPrimaryNetwork: boolean;
+}
+
+export interface PrivateNetwork {
+  id: string;
+  name: string;
+  slug: string;
+  dockerName: string;
+  ownerUserId: string;
+  ownerUsername: string;
+  ownerDisplayName: string;
+  description: string;
+  subnet: string;
+  internalOnly: boolean;
+  dockerExists: boolean;
+  dockerContainerCount: number;
+  projects: PrivateNetworkProjectMember[];
+  services: PrivateNetworkServiceMember[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NetworkProbeResult {
+  executionMode: 'vps' | 'sandbox';
+  reachable: boolean;
+  networkName: string;
+  targetHost: string;
+  targetPort: number;
+  resolvedIp: string | null;
+  method: 'GET' | 'POST' | 'TCP';
+  path: string;
+  statusCode: number | null;
+  latencyMs: number;
+  responsePreview: string;
+  message: string;
 }
 
 export interface HostMetrics {
@@ -57,8 +153,42 @@ export interface BeszelTelemetry {
   history: BeszelStatPoint[];
 }
 
+export interface AppVersionInfo {
+  version: string;
+  commitSha: string | null;
+  repo: string;
+  branch: string;
+}
+
+export interface UpdateCheckResult {
+  status: 'up_to_date' | 'update_available' | 'ahead' | 'error';
+  checkedAt: string;
+  repo: string;
+  branch: string;
+  currentVersion: string;
+  currentCommit: string | null;
+  latestVersion: string | null;
+  latestReleaseTag: string | null;
+  latestReleaseUrl: string | null;
+  latestReleaseNotes: string | null;
+  latestCommit: {
+    sha: string;
+    shortSha: string;
+    message: string;
+    author: string;
+    date: string;
+    url: string;
+  } | null;
+  commitsBehind: number | null;
+  summary: string;
+  updateCommand: string;
+  fallbackUpdateCommand: string;
+  error?: string;
+}
+
 export interface SystemStatus {
   executionMode: 'vps' | 'sandbox';
+  appVersion?: AppVersionInfo;
   capabilities: {
     dockerAvailable: boolean;
     gitAvailable: boolean;
@@ -68,6 +198,7 @@ export interface SystemStatus {
   counts: {
     projects: number;
     services?: number;
+    networks?: number;
     deployments: number;
   };
   hostMetrics: HostMetrics;
@@ -100,6 +231,9 @@ export interface Project {
   lastCommitMsg: string;
   lastDeployedAt: string | null;
   status: string;
+  ownerUserId?: string;
+  privateNetworkId?: string | null;
+  networks?: NetworkRef[];
   createdAt: string;
   updatedAt: string;
 }
@@ -155,6 +289,7 @@ export interface DockerContainer {
   ports: string[];
   networks: string[];
   managedByPanel: boolean;
+  ownerUserId?: string;
 }
 
 export interface CaddyRouteItem {
@@ -219,6 +354,9 @@ export interface DeployedService {
   connectionUrl: string;
   status: string;
   lastMessage: string;
+  ownerUserId?: string;
+  privateNetworkId?: string | null;
+  networks?: NetworkRef[];
   createdAt: string;
   updatedAt: string;
 }
@@ -246,4 +384,12 @@ export interface BeszelConfig {
   hasPassword: boolean;
 }
 
-export type NavTab = 'overview' | 'projects' | 'templates' | 'containers' | 'caddy' | 'provisioning';
+export type NavTab =
+  | 'overview'
+  | 'networks'
+  | 'projects'
+  | 'templates'
+  | 'containers'
+  | 'caddy'
+  | 'provisioning'
+  | 'users';

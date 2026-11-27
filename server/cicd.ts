@@ -4,8 +4,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { decryptSecret } from './crypto.ts';
 import { syncProjectsToCaddyfile } from './caddy.ts';
-import { db, getWorkspacesDir, type DeploymentRow, type ProjectRow } from './db.ts';
 import {
+  db,
+  getResourcePrivateNetworks,
+  getWorkspacesDir,
+  type DeploymentRow,
+  type ProjectRow,
+} from './db.ts';
+import {
+  connectContainerToNetwork,
   ensureDockerNetwork,
   getSystemHostMetrics,
   isDockerAvailable,
@@ -38,8 +45,47 @@ function resolveProjectWorkspace(slug: string): string {
   return target;
 }
 
-function appendDeployLog(deploymentId: string, line: string): void {
-  const stamped = `[${new Date().toISOString().slice(11, 19)}] ${line}\n`;
+export function cleanupProjectWorkspace(slug: string): void {
+  try {
+    const workspaceDir = resolveProjectWorkspace(slug);
+    if (fs.existsSync(workspaceDir)) {
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  } catch {
+    // Ignore cleanup errors for non-existent or invalid workspace paths
+  }
+}
+
+function resolveConfinedBuildFile(
+  workspaceDir: string,
+  requestedPath: string,
+  fallbackFile: string,
+): string {
+  const relRaw = (requestedPath || fallbackFile).trim().replace(/^\/+/, '');
+  const resolved = path.resolve(workspaceDir, relRaw || fallbackFile);
+  if (!resolved.startsWith(workspaceDir + path.sep)) {
+    throw new Error('مسیر فایل ساخت (Dockerfile/Compose) خارج از فضای کاری مجاز پروژه است.');
+  }
+  return path.relative(workspaceDir, resolved);
+}
+
+function scrubSecrets(text: string, secrets: string[]): string {
+  let out = text;
+  for (const s of secrets) {
+    if (s && s.length >= 6) {
+      out = out.split(s).join('***');
+      const encoded = encodeURIComponent(s);
+      if (encoded !== s) {
+        out = out.split(encoded).join('***');
+      }
+    }
+  }
+  return out;
+}
+
+function appendDeployLog(deploymentId: string, line: string, secretsToMask: string[] = []): void {
+  const safeLine = secretsToMask.length > 0 ? scrubSecrets(line, secretsToMask) : line;
+  const stamped = `[${new Date().toISOString().slice(11, 19)}] ${safeLine}\n`;
   db.prepare('UPDATE deployments SET logs = logs || ? WHERE id = ?').run(stamped, deploymentId);
   deployLogBus.emit(`log:${deploymentId}`, stamped);
 }
@@ -50,6 +96,7 @@ function runCommandSafe(
   cwd: string,
   deploymentId: string,
   extraEnv?: Record<string, string>,
+  secretsToMask: string[] = [],
 ): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
@@ -61,14 +108,14 @@ function runCommandSafe(
     child.stdout.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
       for (const l of text.split(/\r?\n/)) {
-        if (l.trim()) appendDeployLog(deploymentId, l);
+        if (l.trim()) appendDeployLog(deploymentId, l, secretsToMask);
       }
     });
 
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
       for (const l of text.split(/\r?\n/)) {
-        if (l.trim()) appendDeployLog(deploymentId, l);
+        if (l.trim()) appendDeployLog(deploymentId, l, secretsToMask);
       }
     });
 
@@ -77,10 +124,10 @@ function runCommandSafe(
   });
 }
 
-function buildAuthenticatedGitUrl(canonicalUrl: string, token: string): string {
-  if (!token) return canonicalUrl;
-  // Pass token via https://x-access-token:<token>@github.com/... strictly in-memory for git process
-  return canonicalUrl.replace('https://', `https://x-access-token:${encodeURIComponent(token)}@`);
+function buildGitAuthArgs(token: string): string[] {
+  if (!token) return [];
+  const basic = Buffer.from(`x-access-token:${token}`, 'utf8').toString('base64');
+  return ['-c', `http.extraheader=AUTHORIZATION: basic ${basic}`];
 }
 
 function parseEnvVarsJson(raw: string): Record<string, string> {
@@ -185,21 +232,24 @@ async function executePipeline(
         deploymentId,
         `پورت‌های شناسایی‌شده: ${inspection.detectedPorts.join(', ')} | پورت انتخابی سرویس: ${project.container_port}`,
       );
+      const privateNets = getResourcePrivateNetworks('project', project.id, project.private_network_id);
+      const defaultNet = process.env.DOCKER_NETWORK?.trim() || 'web';
+      const targetNetNames =
+        privateNets.length > 0 ? privateNets.map((n) => n.docker_name) : [defaultNet];
       const containerName = `sokkan-${project.slug}`;
       if (project.build_mode === 'compose') {
         appendDeployLog(
           deploymentId,
-          `دستور معادل روی VPS: docker compose -f ${project.build_file_path} up -d --build`,
+          `دستور معادل روی VPS: docker compose -f ${project.build_file_path} up -d --build (شبکه: ${targetNetNames.join(', ')})`,
         );
       } else {
         appendDeployLog(
           deploymentId,
           `دستور معادل روی VPS: docker build -t ${containerName}:latest -f ${project.build_file_path} ${project.dockerfile_context}`,
         );
-        const previewNet = process.env.DOCKER_NETWORK?.trim() || 'web';
         appendDeployLog(
           deploymentId,
-          `دستور اجرا روی شبکه Caddy: docker run -d --name ${containerName} --network ${previewNet} --restart unless-stopped ${containerName}:latest`,
+          `دستور اجرا روی شبکه ${targetNetNames[0]}: docker run -d --name ${containerName} --network ${targetNetNames[0]} --network-alias ${project.slug} --restart unless-stopped ${containerName}:latest`,
         );
       }
 
@@ -229,31 +279,44 @@ async function executePipeline(
 
     // Real VPS Execution Mode
     const workspaceDir = resolveProjectWorkspace(project.slug);
-    const gitUrl = buildAuthenticatedGitUrl(canonicalUrl, token);
+    const gitAuthArgs = buildGitAuthArgs(token);
+    const secretsToMask = token ? [token, Buffer.from(`x-access-token:${token}`, 'utf8').toString('base64')] : [];
 
     if (!fs.existsSync(path.join(workspaceDir, '.git'))) {
-      appendDeployLog(deploymentId, `کلون کردن مخزن در ${workspaceDir}...`);
+      appendDeployLog(deploymentId, `کلون کردن مخزن در ${workspaceDir}...`, secretsToMask);
       if (fs.existsSync(workspaceDir)) {
         fs.rmSync(workspaceDir, { recursive: true, force: true });
       }
       fs.mkdirSync(workspaceDir, { recursive: true });
       const cloneCode = await runCommandSafe(
         'git',
-        ['clone', '--branch', branch, '--single-branch', gitUrl, '.'],
+        [...gitAuthArgs, 'clone', '--branch', branch, '--single-branch', canonicalUrl, '.'],
         workspaceDir,
         deploymentId,
+        undefined,
+        secretsToMask,
       );
       if (cloneCode !== 0) {
         throw new Error(`عملیات git clone با کد ${cloneCode} متوقف شد.`);
       }
     } else {
-      appendDeployLog(deploymentId, `دریافت آپدیت‌های جدید از شاخه ${branch}...`);
-      await runCommandSafe('git', ['remote', 'set-url', 'origin', gitUrl], workspaceDir, deploymentId);
-      const fetchCode = await runCommandSafe(
+      appendDeployLog(deploymentId, `دریافت آپدیت‌های جدید از شاخه ${branch}...`, secretsToMask);
+      // Ensure origin URL stays tokenless on disk (.git/config)
+      await runCommandSafe(
         'git',
-        ['fetch', 'origin', branch],
+        ['remote', 'set-url', 'origin', canonicalUrl],
         workspaceDir,
         deploymentId,
+        undefined,
+        secretsToMask,
+      );
+      const fetchCode = await runCommandSafe(
+        'git',
+        [...gitAuthArgs, 'fetch', 'origin', branch],
+        workspaceDir,
+        deploymentId,
+        undefined,
+        secretsToMask,
       );
       if (fetchCode !== 0) {
         throw new Error(`عملیات git fetch با کد ${fetchCode} ناموفق بود.`);
@@ -263,40 +326,69 @@ async function executePipeline(
         ['reset', '--hard', `origin/${branch}`],
         workspaceDir,
         deploymentId,
+        undefined,
+        secretsToMask,
       );
       if (resetCode !== 0) {
         throw new Error(`به‌روزرسانی فایل‌های کاری با کد ${resetCode} ناموفق بود.`);
       }
     }
 
-    // Write project .env file securely inside workspace
-    if (Object.keys(envMap).length > 0) {
-      const envLines = Object.entries(envMap)
-        .filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
-        .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+    // Write project .env file securely inside workspace without literal JSON quotes (Docker --env-file does not unquote values)
+    const envFilePath = path.join(workspaceDir, '.env');
+    const validEnvEntries = Object.entries(envMap).filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));
+    if (validEnvEntries.length > 0) {
+      const envLines = validEnvEntries
+        .map(([k, v]) => `${k}=${String(v).replace(/[\r\n]+/g, ' ')}`)
         .join('\n');
-      fs.writeFileSync(path.join(workspaceDir, '.env'), envLines + '\n', { mode: 0o600 });
+      fs.writeFileSync(envFilePath, envLines + '\n', { mode: 0o600 });
       appendDeployLog(deploymentId, 'فایل متغیرهای محیطی (.env) در فضای کاری نوشته شد.');
+    } else if (fs.existsSync(envFilePath)) {
+      fs.unlinkSync(envFilePath);
     }
 
-    const dockerNetwork = process.env.DOCKER_NETWORK?.trim() || 'web';
-    await ensureDockerNetwork(dockerNetwork);
+    const privateNets = getResourcePrivateNetworks('project', project.id, project.private_network_id);
+    const fallbackNetwork = process.env.DOCKER_NETWORK?.trim() || 'web';
+    const primaryNet = privateNets[0]?.docker_name || fallbackNetwork;
+
+    if (privateNets.length > 0) {
+      for (const pNet of privateNets) {
+        await ensureDockerNetwork(pNet.docker_name, {
+          internal: pNet.internal_only === 1,
+          subnet: pNet.subnet || undefined,
+          ownerUserId: pNet.owner_user_id,
+        });
+      }
+    } else {
+      await ensureDockerNetwork(fallbackNetwork);
+    }
+
     const containerName = `sokkan-${project.slug}`;
 
     if (project.build_mode === 'compose') {
-      const composeFile = path.basename(project.build_file_path || 'docker-compose.yml');
+      const composeFile = resolveConfinedBuildFile(
+        workspaceDir,
+        project.build_file_path,
+        'docker-compose.yml',
+      );
       appendDeployLog(deploymentId, `اجرای docker compose با فایل ${composeFile}...`);
       const upCode = await runCommandSafe(
         'docker',
         ['compose', '-p', containerName, '-f', composeFile, 'up', '-d', '--build', '--remove-orphans'],
         workspaceDir,
         deploymentId,
+        undefined,
+        secretsToMask,
       );
       if (upCode !== 0) {
         throw new Error(`اجرای docker compose ناموفق بود (کد ${upCode}).`);
       }
     } else {
-      const dockerfileName = path.basename(project.build_file_path || 'Dockerfile');
+      const dockerfileRel = resolveConfinedBuildFile(
+        workspaceDir,
+        project.build_file_path,
+        'Dockerfile',
+      );
       const contextRel = project.dockerfile_context?.trim() || '.';
       const resolvedContext = path.resolve(workspaceDir, contextRel);
       if (
@@ -310,15 +402,17 @@ async function executePipeline(
       appendDeployLog(deploymentId, `ساخت ایمیج داکر ${imageTag}...`);
       const buildCode = await runCommandSafe(
         'docker',
-        ['build', '-t', imageTag, '-f', dockerfileName, contextRel],
+        ['build', '-t', imageTag, '-f', dockerfileRel, contextRel],
         workspaceDir,
         deploymentId,
+        undefined,
+        secretsToMask,
       );
       if (buildCode !== 0) {
         throw new Error(`ساخت ایمیج داکر ناموفق بود (کد ${buildCode}).`);
       }
 
-      appendDeployLog(deploymentId, `جایگزینی کانتینر ${containerName} روی شبکه ${dockerNetwork}...`);
+      appendDeployLog(deploymentId, `جایگزینی کانتینر ${containerName} روی شبکه ${primaryNet}...`);
       await runCommandSafe('docker', ['rm', '-f', containerName], workspaceDir, deploymentId).catch(
         () => 0,
       );
@@ -329,13 +423,17 @@ async function executePipeline(
         '--name',
         containerName,
         '--network',
-        dockerNetwork,
+        primaryNet,
+        '--network-alias',
+        project.slug,
         '--restart',
         'unless-stopped',
         '--label',
         'sokkan.managed=true',
         '--label',
         `sokkan.project=${project.slug}`,
+        '--label',
+        `sokkan.owner=${project.owner_user_id}`,
       ];
       if (fs.existsSync(path.join(workspaceDir, '.env'))) {
         runArgs.push('--env-file', path.join(workspaceDir, '.env'));
@@ -345,6 +443,11 @@ async function executePipeline(
       const runCode = await runCommandSafe('docker', runArgs, workspaceDir, deploymentId);
       if (runCode !== 0) {
         throw new Error(`اجرای کانتینر جدید با خطا مواجه شد (کد ${runCode}).`);
+      }
+
+      for (const extraNet of privateNets.slice(1)) {
+        appendDeployLog(deploymentId, `اتصال کانتینر به شبکه خصوصی ${extraNet.name} (${extraNet.docker_name})...`);
+        await connectContainerToNetwork(containerName, extraNet.docker_name, [project.slug]);
       }
     }
 
@@ -373,8 +476,9 @@ async function executePipeline(
     appendDeployLog(deploymentId, 'دیپلوی با موفقیت به پایان رسید.');
     deployLogBus.emit(`done:${deploymentId}`, 'success');
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : 'خطای ناشناخته در دیپلوی';
-    appendDeployLog(deploymentId, `خطا: ${errMsg}`);
+    const rawMsg = err instanceof Error ? err.message : 'خطای ناشناخته در دیپلوی';
+    const errMsg = token ? scrubSecrets(rawMsg, [token]) : rawMsg;
+    appendDeployLog(deploymentId, `خطا: ${errMsg}`, token ? [token] : []);
     const doneAt = new Date().toISOString();
     db.prepare('UPDATE deployments SET status = ?, finished_at = ? WHERE id = ?').run(
       'failed',

@@ -1,14 +1,15 @@
 import { useState, type FormEvent } from 'react';
 import { apiFetch, setAuthToken } from '../api';
-import type { AuthStatus } from '../types';
+import type { AuthStatus, AuthUser } from '../types';
 import { SokkanLogo } from './SokkanLogo';
 
 interface AuthGateProps {
   authStatus: AuthStatus;
-  onAuthenticated: () => void;
+  onAuthenticated: (user: AuthUser) => void;
 }
 
 export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
+  const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -32,12 +33,13 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
     setLoading(true);
     try {
       const endpoint = isSetup ? '/api/auth/setup' : '/api/auth/login';
-      const data = await apiFetch<{ token: string }>(endpoint, {
+      const payload = isSetup ? { password } : { username: username.trim() || 'admin', password };
+      const data = await apiFetch<{ token: string; user: AuthUser }>(endpoint, {
         method: 'POST',
-        body: JSON.stringify({ password }),
+        body: JSON.stringify(payload),
       });
       setAuthToken(data.token);
-      onAuthenticated();
+      onAuthenticated(data.user);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'خطا در ورود به پنل');
     } finally {
@@ -56,18 +58,43 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
               {isSetup
-                ? 'اولین اجرا: یک رمز عبور امن برای محافظت از داکر، گیتهاب و Caddy تعریف کنید.'
+                ? 'اولین اجرا: رمز مدیر کل (admin) را برای مدیریت سرور، شبکه‌ها و کاربران تعریف کنید.'
                 : authStatus.envPasscodeActive
-                  ? 'رمز تعریف‌شده در متغیر محیطی سرور را وارد کنید.'
-                  : 'برای دسترسی به داشبورد CI/CD و کانتینرها رمز مدیر را وارد کنید.'}
+                  ? 'نام کاربری و رمز عبور خود را وارد کنید.'
+                  : 'با حساب مدیر (admin) یا نام کاربری تعریف‌شده وارد فضای کاری خود شوید.'}
             </p>
           </div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {!isSetup && (
+            <div>
+              <label htmlFor="panel-username" className="block text-xs font-medium text-slate-300 mb-1.5">
+                نام کاربری
+              </label>
+              <input
+                id="panel-username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                required
+                dir="ltr"
+                placeholder="admin"
+                className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3.5 py-2.5 text-sm text-slate-100 font-mono focus:outline-none focus:border-sky-500 transition-colors"
+              />
+            </div>
+          )}
+
+          {isSetup && (
+            <div className="bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3.5 py-2.5 flex items-center justify-between text-xs">
+              <span className="text-slate-400">نام کاربری مدیر کل</span>
+              <span className="font-mono text-sky-400">admin</span>
+            </div>
+          )}
+
           <div>
             <label htmlFor="panel-password" className="block text-xs font-medium text-slate-300 mb-1.5">
-              رمز عبور مدیر
+              {isSetup ? 'رمز عبور مدیر' : 'رمز عبور'}
             </label>
             <input
               id="panel-password"
@@ -75,7 +102,8 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              autoFocus
+              autoFocus={isSetup}
+              dir="ltr"
               placeholder={isSetup ? 'حداقل ۸ کاراکتر' : '••••••••'}
               className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3.5 py-2.5 text-sm text-slate-100 font-mono focus:outline-none focus:border-sky-500 transition-colors"
             />
@@ -92,6 +120,7 @@ export function AuthGate({ authStatus, onAuthenticated }: AuthGateProps) {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 required
+                dir="ltr"
                 placeholder="تکرار رمز عبور"
                 className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3.5 py-2.5 text-sm text-slate-100 font-mono focus:outline-none focus:border-sky-500 transition-colors"
               />

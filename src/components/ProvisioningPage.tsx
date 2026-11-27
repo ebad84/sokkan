@@ -1,6 +1,6 @@
-import { Check, Copy, Download, HardDriveDownload, ServerCog, Upload } from 'lucide-react';
+import { Check, Copy, Download, HardDriveDownload, Lock, ServerCog, ShieldCheck, Upload } from 'lucide-react';
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react';
-import { apiFetch } from '../api';
+import { apiFetch, setAuthToken } from '../api';
 
 interface ProvisioningPageProps {
   onBackupRestored: () => void;
@@ -23,9 +23,16 @@ export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
   const [activeFile, setActiveFile] = useState<'bootstrap' | 'compose' | 'dockerfile'>('bootstrap');
   const [copied, setCopied] = useState(false);
 
-  const [backupFeedback, setBackupFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(
-    null,
-  );
+  const [backupFeedback, setBackupFeedback] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+    warnings?: string[];
+  } | null>(null);
+  const [exportPassphrase, setExportPassphrase] = useState('');
+  const [importPassphrase, setImportPassphrase] = useState('');
+  const [importMode, setImportMode] = useState<'replace' | 'merge'>('replace');
+  const [redeployServices, setRedeployServices] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
 
   const generateBundle = useCallback(async () => {
@@ -88,23 +95,36 @@ export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
 
   const handleExportBackup = async () => {
     setBackupFeedback(null);
+    setExporting(true);
     try {
-      const data = await apiFetch<Record<string, unknown>>('/api/backup/export');
+      const pass = exportPassphrase.trim();
+      if (pass && pass.length < 6) {
+        throw new Error('رمز رمزنگاری فایل پشتیبان باید حداقل ۶ کاراکتر باشد (یا برای خروجی بدون رمز آن را خالی بگذارید).');
+      }
+      const data = await apiFetch<Record<string, unknown>>('/api/backup/export', {
+        method: 'POST',
+        body: JSON.stringify({ passphrase: pass || undefined }),
+      });
       const dateStr = new Date().toISOString().slice(0, 10);
+      const suffix = pass ? '-encrypted' : '-full';
       handleDownloadFile(
-        `sokkan-backup-${dateStr}.json`,
+        `sokkan-backup-${dateStr}${suffix}.json`,
         JSON.stringify(data, null, 2),
         'application/json',
       );
       setBackupFeedback({
         type: 'ok',
-        text: 'فایل پشتیبان پروژه‌ها و تنظیمات Caddy با موفقیت دانلود شد.',
+        text: pass
+          ? 'فایل پشتیبان کامل (شامل کاربران، رمزها، توکن‌ها، متغیرهای محیطی، شبکه‌های خصوصی، سرویس‌ها، Beszel و Caddyfile) با رمزنگاری AES-256-GCM دانلود شد.'
+          : 'فایل پشتیبان کامل JSON (شامل تمام تنظیمات، کاربران، توکن‌ها، متغیرهای محیطی و رمزها) دانلود شد. آن را در جای امن نگهداری کنید.',
       });
     } catch (err) {
       setBackupFeedback({
         type: 'err',
         text: err instanceof Error ? err.message : 'خطا در تهیه فایل پشتیبان',
       });
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -115,14 +135,44 @@ export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
     setBackupFeedback(null);
     try {
       const text = await file.text();
-      const json = JSON.parse(text) as unknown;
-      const res = await apiFetch<{ importedCount: number }>('/api/backup/import', {
+      const json = JSON.parse(text) as Record<string, unknown>;
+      const res = await apiFetch<{
+        ok: boolean;
+        importedCount: number;
+        mode: 'replace' | 'merge';
+        restored?: {
+          users: number;
+          privateNetworks: number;
+          networkAttachments: number;
+          services: number;
+          projects: number;
+          caddySnapshots: number;
+          beszelRestored: boolean;
+          caddyfileRestored: boolean;
+          servicesRedeployed: number;
+        };
+        warnings?: string[];
+        token?: string;
+      }>('/api/backup/import', {
         method: 'POST',
-        body: JSON.stringify(json),
+        body: JSON.stringify({
+          backup: json,
+          passphrase: importPassphrase.trim() || undefined,
+          mode: importMode,
+          redeployServices,
+        }),
       });
+      if (res.token) {
+        setAuthToken(res.token);
+      }
+      const r = res.restored;
+      const summaryText = r
+        ? `بازیابی کامل (${res.mode === 'replace' ? 'جایگزینی کامل' : 'ادغام'}) انجام شد: ${r.users} کاربر، ${r.privateNetworks} شبکه خصوصی، ${r.services} سرویس آماده، ${r.projects} پروژه (با توکن، وب‌هوک و Env کامل)${r.beszelRestored ? '، تنظیمات و رمز Beszel' : ''}${r.caddyfileRestored ? ' و Caddyfile' : ''} بازگردانی شد${r.servicesRedeployed > 0 ? ` (${r.servicesRedeployed} سرویس روی سرور استارت شد)` : ''}.`
+        : `بازیابی انجام شد: ${res.importedCount} پروژه بازیابی شد.`;
       setBackupFeedback({
         type: 'ok',
-        text: `بازیابی انجام شد: ${res.importedCount} پروژه جدید اضافه شد و Caddyfile بازگردانی گردید.`,
+        text: summaryText,
+        warnings: res.warnings && res.warnings.length > 0 ? res.warnings : undefined,
       });
       onBackupRestored();
     } catch (err) {
@@ -296,31 +346,101 @@ export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
         </div>
       </div>
 
-      {/* Backup & Disaster Recovery */}
-      <div className="bg-[#111827] border border-[#1F2937] rounded-xl p-6 space-y-4">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="space-y-1">
+      {/* Full Backup & Disaster Recovery */}
+      <div className="bg-[#111827] border border-[#1F2937] rounded-xl p-6 space-y-5">
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-sky-400" />
             <h2 className="text-base font-semibold text-slate-100">
-              بکاپ یکپارچه و بازیابی سریع روی سرور جدید
+              بکاپ کامل و بازیابی بدون افت داده (نصب مجدد روی سرور جدید)
             </h2>
-            <p className="text-xs text-slate-400">
-              خروجی JSON شامل لیست کامل مخازن گیتهاب، دامنه‌ها، تنظیمات Webhook/Polling و Caddyfile کامل سرور است.
-            </p>
           </div>
+          <p className="text-xs text-slate-400 leading-relaxed">
+            این بکاپ نسخه ۲ شامل <strong className="text-slate-200">تمام داده‌ها و کلیدهای امنیتی</strong> است: حساب‌های کاربری و هش رمز عبور، شبکه‌های خصوصی و اتصالات، پروژه‌ها همراه با شناسه ثابت وب‌هوک، توکن‌های گیتهاب، کلیدهای Webhook و تمام متغیرهای <code className="text-slate-200">.env</code>، سرویس‌های آماده و رمز دیتابیس‌ها، تنظیمات و رمز Beszel، و Caddyfile به همراه تاریخچه اسنپ‌شات‌ها. حتی با تغییر کلید رمزنگاری سرور جدید، تمام سکرت‌ها به‌طور خودکار با کلید جدید رمزنگاری و بازیابی می‌شوند.
+          </p>
+        </div>
 
-          <div className="flex items-center gap-3 shrink-0 flex-wrap">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Export Card */}
+          <div className="bg-[#0B0F17] border border-[#1F2937] rounded-xl p-4 space-y-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-slate-100">تهیه خروجی کامل (Export)</span>
+              <span className="text-[11px] text-emerald-400 font-mono">schema v2 + secrets</span>
+            </div>
+            <div>
+              <label className="block text-slate-300 mb-1">
+                رمز رمزنگاری فایل بکاپ (پیشنهادی برای محافظت از توکن‌ها و رمزها)
+              </label>
+              <div className="relative">
+                <Lock className="w-3.5 h-3.5 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="password"
+                  value={exportPassphrase}
+                  onChange={(e) => setExportPassphrase(e.target.value)}
+                  placeholder="حداقل ۶ کاراکتر (یا خالی برای خروجی JSON بدون رمز)"
+                  className="w-full bg-[#111827] border border-[#1F2937] rounded-lg pr-9 pl-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-sky-500"
+                />
+              </div>
+            </div>
             <button
               type="button"
+              disabled={exporting}
               onClick={handleExportBackup}
-              className="px-4 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-lg flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              className="w-full justify-center px-4 py-2.5 text-xs font-semibold bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 rounded-lg flex items-center gap-1.5 cursor-pointer"
             >
-              <HardDriveDownload className="w-3.5 h-3.5" />
-              دانلود بکاپ JSON
+              <HardDriveDownload className="w-4 h-4" />
+              {exporting
+                ? 'در حال آماده‌سازی بکاپ...'
+                : exportPassphrase.trim()
+                  ? 'دانلود بکاپ کامل رمزنگاری‌شده'
+                  : 'دانلود بکاپ کامل JSON'}
             </button>
+          </div>
 
-            <label className="px-4 py-2 text-xs font-medium text-slate-200 bg-[#0B0F17] border border-[#1F2937] hover:border-slate-600 rounded-lg flex items-center gap-1.5 cursor-pointer whitespace-nowrap">
-              <Upload className="w-3.5 h-3.5" />
-              {importing ? 'در حال بازیابی...' : 'بازگردانی فایل بکاپ'}
+          {/* Import Card */}
+          <div className="bg-[#0B0F17] border border-[#1F2937] rounded-xl p-4 space-y-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-slate-100">بازگردانی فایل بکاپ (Import)</span>
+              <span className="text-[11px] text-slate-400 font-mono">v1 / v2 / encrypted</span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-slate-300 mb-1">حالت بازیابی</label>
+                <select
+                  value={importMode}
+                  onChange={(e) => setImportMode(e.target.value === 'merge' ? 'merge' : 'replace')}
+                  className="w-full bg-[#111827] border border-[#1F2937] rounded-lg px-2.5 py-2 text-slate-100 focus:outline-none focus:border-sky-500"
+                >
+                  <option value="replace">جایگزینی کامل (نصب مجدد)</option>
+                  <option value="merge">ادغام با داده‌های فعلی</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-slate-300 mb-1">رمز بازگشایی (در صورت رمزنگاری)</label>
+                <input
+                  type="password"
+                  value={importPassphrase}
+                  onChange={(e) => setImportPassphrase(e.target.value)}
+                  placeholder="رمز تعیین‌شده هنگام بکاپ"
+                  className="w-full bg-[#111827] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-sky-500"
+                />
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={redeployServices}
+                onChange={(e) => setRedeployServices(e.target.checked)}
+                className="accent-sky-500"
+              />
+              اجرای خودکار کانتینر سرویس‌های آماده (دیتابیس‌ها/ابزارها) روی VPS پس از بازیابی
+            </label>
+
+            <label className="w-full justify-center px-4 py-2.5 text-xs font-medium text-slate-100 bg-[#111827] border border-[#1F2937] hover:border-sky-500/50 rounded-lg flex items-center gap-1.5 cursor-pointer">
+              <Upload className="w-4 h-4 text-sky-400" />
+              {importing ? 'در حال رمزگشایی و بازیابی...' : 'انتخاب و بازگردانی فایل بکاپ JSON'}
               <input
                 type="file"
                 accept="application/json,.json"
@@ -334,13 +454,20 @@ export function ProvisioningPage({ onBackupRestored }: ProvisioningPageProps) {
 
         {backupFeedback && (
           <div
-            className={`rounded-lg px-4 py-2.5 text-xs border ${
+            className={`rounded-lg px-4 py-3 text-xs border space-y-2 ${
               backupFeedback.type === 'ok'
-                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
                 : 'bg-red-500/10 border-red-500/20 text-red-400'
             }`}
           >
-            {backupFeedback.text}
+            <div>{backupFeedback.text}</div>
+            {backupFeedback.warnings && backupFeedback.warnings.length > 0 && (
+              <ul className="list-disc pr-4 space-y-1 text-amber-300">
+                {backupFeedback.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
       </div>

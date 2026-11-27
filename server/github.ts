@@ -52,7 +52,7 @@ async function fetchRepoFileText(
   token?: string,
 ): Promise<string | null> {
   const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(branch)}`;
-  const res = await fetch(url, { headers: githubHeaders(token) });
+  const res = await fetch(url, { headers: githubHeaders(token), signal: AbortSignal.timeout(10000) });
   if (!res.ok) {
     return null;
   }
@@ -183,7 +183,7 @@ export async function fetchLatestGitHubCommit(
   const safeBranch = validateBranchName(branch);
   const res = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(safeBranch)}`,
-    { headers: githubHeaders(token) },
+    { headers: githubHeaders(token), signal: AbortSignal.timeout(10000) },
   );
   if (!res.ok) {
     return null;
@@ -212,7 +212,7 @@ export async function inspectGitHubRepo(
 
   const repoRes = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
-    { headers },
+    { headers, signal: AbortSignal.timeout(10000) },
   );
   if (!repoRes.ok) {
     if (repoRes.status === 404) {
@@ -234,7 +234,7 @@ export async function inspectGitHubRepo(
 
   const contentsRes = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?ref=${encodeURIComponent(targetBranch)}`,
-    { headers },
+    { headers, signal: AbortSignal.timeout(10000) },
   );
   const rootItems = contentsRes.ok
     ? ((await contentsRes.json()) as Array<{ name: string; type: string }>)

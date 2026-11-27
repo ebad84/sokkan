@@ -1,7 +1,31 @@
-import { Activity, ArrowUpLeft, CheckCircle2, Cpu, Database, HardDrive, RefreshCw, Server, Terminal } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
+import {
+  Activity,
+  AlertTriangle,
+  ArrowDownToLine,
+  ArrowUpLeft,
+  Check,
+  CheckCircle2,
+  Copy,
+  Cpu,
+  Database,
+  ExternalLink,
+  GitCommitHorizontal,
+  HardDrive,
+  Info,
+  RefreshCw,
+  Server,
+  Terminal,
+} from 'lucide-react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { apiFetch } from '../api';
-import type { BeszelConfig, Deployment, NavTab, Project, SystemStatus } from '../types';
+import type {
+  BeszelConfig,
+  Deployment,
+  NavTab,
+  Project,
+  SystemStatus,
+  UpdateCheckResult,
+} from '../types';
 
 interface OverviewPageProps {
   status: SystemStatus | null;
@@ -9,6 +33,8 @@ interface OverviewPageProps {
   projects: Project[];
   deployments: Deployment[];
   beszelConfig: BeszelConfig | null;
+  isAdmin: boolean;
+  networksCount: number;
   onRefresh: () => void;
   onNavigate: (tab: NavTab) => void;
   onInspectDeployment: (deploymentId: string) => void;
@@ -118,6 +144,8 @@ export function OverviewPage({
   projects,
   deployments,
   beszelConfig,
+  isAdmin,
+  networksCount,
   onRefresh,
   onNavigate,
   onInspectDeployment,
@@ -131,6 +159,44 @@ export function OverviewPage({
   const [savingBeszel, setSavingBeszel] = useState(false);
   const [beszelMsg, setBeszelMsg] = useState('');
   const [beszelErr, setBeszelErr] = useState('');
+
+  // Sokkan version & update check state
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
+  const [updateErr, setUpdateErr] = useState('');
+  const [copiedCmd, setCopiedCmd] = useState<'primary' | 'fallback' | null>(null);
+
+  useEffect(() => {
+    if (!beszelConfig) return;
+    setBeszelEnabled(beszelConfig.enabled);
+    setBeszelUrl(beszelConfig.url);
+    setBeszelEmail(beszelConfig.email);
+  }, [beszelConfig]);
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    setUpdateErr('');
+    try {
+      const result = await apiFetch<UpdateCheckResult>('/api/system/check-update', {
+        method: 'POST',
+      });
+      setUpdateResult(result);
+    } catch (err) {
+      setUpdateErr(err instanceof Error ? err.message : 'خطا در بررسی نسخه جدید سکان');
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const handleCopyCommand = async (cmd: string, kind: 'primary' | 'fallback') => {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopiedCmd(kind);
+      setTimeout(() => setCopiedCmd((prev) => (prev === kind ? null : prev)), 2000);
+    } catch {
+      // Clipboard API unavailable
+    }
+  };
 
   const handleSaveBeszel = async (e: FormEvent) => {
     e.preventDefault();
@@ -199,13 +265,22 @@ export function OverviewPage({
       {/* Execution Mode Banner */}
       <div className="bg-[#111827] border border-[#1F2937] rounded-xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="space-y-1">
-          <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-            <Server className="w-4 h-4 text-sky-400" />
+          <div className="flex flex-wrap items-center gap-2.5 text-sm font-semibold text-slate-100">
+            <Server className="w-4 h-4 text-sky-400 shrink-0" />
             <span>
               {status?.executionMode === 'vps'
                 ? 'حالت عملیاتی VPS فعال است (اتصال مستقیم به Docker و Git)'
                 : 'حالت پیش‌نمایش و آماده‌سازی سرور (سوکت داکر در این محیط متصل نیست)'}
             </span>
+            {status?.appVersion?.version && (
+              <span
+                dir="ltr"
+                className="text-xs font-mono tabular-nums text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2 py-0.5 rounded-md"
+              >
+                سکان v{status.appVersion.version}
+                {status.appVersion.commitSha ? ` · ${status.appVersion.commitSha}` : ''}
+              </span>
+            )}
           </div>
           <p className="text-xs text-slate-400 leading-relaxed">
             {status?.executionMode === 'vps'
@@ -225,10 +300,10 @@ export function OverviewPage({
           </button>
           <button
             type="button"
-            onClick={() => onNavigate('provisioning')}
+            onClick={() => onNavigate(isAdmin ? 'provisioning' : 'networks')}
             className="px-4 py-2 text-xs font-semibold text-slate-950 bg-sky-500 hover:bg-sky-400 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
           >
-            اسکریپت نصب روی VPS
+            {isAdmin ? 'اسکریپت نصب روی VPS' : 'مدیریت شبکه‌های خصوصی'}
             <ArrowUpLeft className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -284,9 +359,243 @@ export function OverviewPage({
             {host ? formatUptime(host.uptimeSeconds) : '—'}
           </div>
           <div className="text-xs text-slate-400 mt-2 tabular-nums">
-            {projects.length} پروژه تعریف‌شده · {deployments.length} دیپلوی اخیر
+            {networksCount} شبکه خصوصی · {projects.length} پروژه · {deployments.length} دیپلوی اخیر
           </div>
         </div>
+      </div>
+
+      {/* Sokkan Version & Update Check */}
+      <div className="bg-[#111827] border border-[#1F2937] rounded-xl p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h2 className="text-sm font-semibold text-slate-100">نسخه و بروزرسانی سکان</h2>
+              <span
+                dir="ltr"
+                className="text-xs font-mono tabular-nums text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2 py-0.5 rounded-md"
+              >
+                v{status?.appVersion?.version ?? '1.1.0'}
+              </span>
+              {status?.appVersion?.commitSha && (
+                <span
+                  dir="ltr"
+                  className="text-[11px] font-mono tabular-nums text-slate-400 bg-[#0B0F17] border border-[#1F2937] px-2 py-0.5 rounded-md"
+                >
+                  #{status.appVersion.commitSha}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-400">
+              مخزن رسمی:{' '}
+              <a
+                href={`https://github.com/${status?.appVersion?.repo ?? 'ebad84/sokkan'}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                dir="ltr"
+                className="font-mono text-slate-300 hover:text-sky-400 transition-colors inline-flex items-center gap-1"
+              >
+                {status?.appVersion?.repo ?? 'ebad84/sokkan'}
+                <ExternalLink className="w-3 h-3" />
+              </a>{' '}
+              · شاخه{' '}
+              <span dir="ltr" className="font-mono text-slate-300">
+                {status?.appVersion?.branch ?? 'main'}
+              </span>
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleCheckUpdate}
+            disabled={checkingUpdate}
+            className="px-4 py-2 text-xs font-semibold text-slate-100 bg-[#0B0F17] border border-[#1F2937] hover:border-sky-500/60 hover:text-sky-300 disabled:opacity-60 rounded-lg transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap self-start sm:self-auto"
+          >
+            {checkingUpdate ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-400" />
+            ) : (
+              <ArrowDownToLine className="w-3.5 h-3.5 text-sky-400" />
+            )}
+            <span>{checkingUpdate ? 'در حال بررسی مخزن گیتهاب...' : 'بررسی آپدیت'}</span>
+          </button>
+        </div>
+
+        {updateErr && (
+          <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3.5 text-xs text-red-300 flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <span>{updateErr}</span>
+          </div>
+        )}
+
+        {updateResult && (
+          <div className="bg-[#0B0F17] border border-[#1F2937] rounded-lg p-4 space-y-3.5 text-xs">
+            {/* Status Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-start gap-2.5">
+                {updateResult.status === 'up_to_date' && (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                )}
+                {updateResult.status === 'update_available' && (
+                  <ArrowDownToLine className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                )}
+                {updateResult.status === 'ahead' && (
+                  <Info className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+                )}
+                {updateResult.status === 'error' && (
+                  <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-0.5">
+                  <div
+                    className={`font-semibold ${
+                      updateResult.status === 'up_to_date'
+                        ? 'text-emerald-400'
+                        : updateResult.status === 'update_available'
+                          ? 'text-amber-400'
+                          : updateResult.status === 'ahead'
+                            ? 'text-sky-400'
+                            : 'text-red-400'
+                    }`}
+                  >
+                    {updateResult.status === 'up_to_date' && 'سکان به‌روز است'}
+                    {updateResult.status === 'update_available' && 'بروزرسانی جدید در دسترس است'}
+                    {updateResult.status === 'ahead' && 'نسخه فعلی جدیدتر از مخزن گیتهاب است'}
+                    {updateResult.status === 'error' && 'خطا در بررسی بروزرسانی'}
+                  </div>
+                  <p className="text-slate-300 leading-relaxed">{updateResult.summary}</p>
+                </div>
+              </div>
+              <span className="text-[11px] text-slate-500 font-mono tabular-nums shrink-0">
+                بررسی‌شده در {new Date(updateResult.checkedAt).toLocaleTimeString('fa-IR')}
+              </span>
+            </div>
+
+            {/* Version & Latest Commit Details */}
+            {updateResult.status !== 'error' && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-3 border-t border-[#1F2937]">
+                <div className="bg-[#111827] border border-[#1F2937] rounded-lg p-3">
+                  <div className="text-[11px] text-slate-400 mb-1">نسخه نصب‌شده</div>
+                  <div dir="ltr" className="font-mono font-semibold text-slate-100 tabular-nums text-right">
+                    v{updateResult.currentVersion}
+                    {updateResult.currentCommit ? ` (${updateResult.currentCommit})` : ''}
+                  </div>
+                </div>
+
+                <div className="bg-[#111827] border border-[#1F2937] rounded-lg p-3">
+                  <div className="text-[11px] text-slate-400 mb-1">آخرین نسخه در گیتهاب</div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span dir="ltr" className="font-mono font-semibold text-slate-100 tabular-nums">
+                      {updateResult.latestVersion ? `v${updateResult.latestVersion}` : '—'}
+                    </span>
+                    {updateResult.latestReleaseUrl && (
+                      <a
+                        href={updateResult.latestReleaseUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[11px] text-sky-400 hover:text-sky-300 inline-flex items-center gap-1"
+                      >
+                        مشاهده انتشار
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-[#111827] border border-[#1F2937] rounded-lg p-3">
+                  <div className="text-[11px] text-slate-400 mb-1 flex items-center justify-between">
+                    <span>آخرین کامیت گیتهاب</span>
+                    {updateResult.latestCommit?.date && (
+                      <span className="text-[10px] text-slate-500 tabular-nums">
+                        {new Date(updateResult.latestCommit.date).toLocaleDateString('fa-IR')}
+                      </span>
+                    )}
+                  </div>
+                  {updateResult.latestCommit ? (
+                    <div className="space-y-1">
+                      <a
+                        href={updateResult.latestCommit.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        dir="ltr"
+                        className="font-mono text-sky-400 hover:text-sky-300 inline-flex items-center gap-1"
+                      >
+                        <GitCommitHorizontal className="w-3.5 h-3.5" />
+                        {updateResult.latestCommit.shortSha}
+                      </a>
+                      <div
+                        className="text-[11px] text-slate-300 truncate"
+                        title={updateResult.latestCommit.message}
+                      >
+                        {updateResult.latestCommit.message}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-slate-500">—</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Update Command Box when update is available */}
+            {updateResult.status === 'update_available' && (
+              <div className="pt-3 border-t border-[#1F2937] space-y-2">
+                {isAdmin ? (
+                  <>
+                    <div className="text-slate-300 font-medium">
+                      دستور بروزرسانی در ترمینال سرور (تنظیمات و دیتابیس شما حفظ می‌شود):
+                    </div>
+                    <div className="flex items-center justify-between gap-2 bg-[#111827] border border-[#1F2937] rounded-lg px-3 py-2">
+                      <code dir="ltr" className="font-mono text-sky-300 text-xs overflow-x-auto">
+                        {updateResult.updateCommand}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyCommand(updateResult.updateCommand, 'primary')}
+                        className="px-2.5 py-1 text-[11px] text-slate-300 hover:text-slate-100 bg-[#0B0F17] border border-[#1F2937] rounded-md inline-flex items-center gap-1 cursor-pointer shrink-0"
+                      >
+                        {copiedCmd === 'primary' ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-400" />
+                            <span>کپی شد</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>کپی</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 bg-[#111827] border border-[#1F2937] rounded-lg px-3 py-2">
+                      <code dir="ltr" className="font-mono text-slate-400 text-[11px] overflow-x-auto">
+                        {updateResult.fallbackUpdateCommand}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyCommand(updateResult.fallbackUpdateCommand, 'fallback')}
+                        className="px-2.5 py-1 text-[11px] text-slate-300 hover:text-slate-100 bg-[#0B0F17] border border-[#1F2937] rounded-md inline-flex items-center gap-1 cursor-pointer shrink-0"
+                      >
+                        {copiedCmd === 'fallback' ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-400" />
+                            <span>کپی شد</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>کپی</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-slate-400">
+                    برای اعمال این بروزرسانی روی سرور با مدیر کل پنل هماهنگ کنید.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Resource Telemetry + Optional Beszel API */}
@@ -302,16 +611,18 @@ export function OverviewPage({
                 : 'منبع داده: پایشگر داخلی سرور (با امکان اتصال اختیاری به Beszel)'}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => setShowBeszelForm((v) => !v)}
-            className="px-3.5 py-2 text-xs font-medium text-slate-200 bg-[#0B0F17] border border-[#1F2937] hover:border-sky-500/50 rounded-lg transition-colors cursor-pointer whitespace-nowrap self-start"
-          >
-            {status?.beszel?.connected ? 'تنظیمات اتصال Beszel (متصل)' : 'اتصال به API ابزار Beszel'}
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => setShowBeszelForm((v) => !v)}
+              className="px-3.5 py-2 text-xs font-medium text-slate-200 bg-[#0B0F17] border border-[#1F2937] hover:border-sky-500/50 rounded-lg transition-colors cursor-pointer whitespace-nowrap self-start"
+            >
+              {status?.beszel?.connected ? 'تنظیمات اتصال Beszel (متصل)' : 'اتصال به API ابزار Beszel'}
+            </button>
+          )}
         </div>
 
-        {showBeszelForm && (
+        {isAdmin && showBeszelForm && (
           <form
             onSubmit={handleSaveBeszel}
             className="bg-[#0B0F17] border border-[#1F2937] rounded-lg p-4 space-y-4"

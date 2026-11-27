@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import { promisify } from 'node:util';
 
@@ -149,6 +150,9 @@ export interface DockerContainerSummary {
   ports: string[];
   networks: string[];
   managedByPanel: boolean;
+  ownerUserId?: string;
+  projectSlug?: string;
+  serviceSlug?: string;
 }
 
 interface RawDockerContainer {
@@ -190,6 +194,9 @@ export async function listDockerContainers(): Promise<DockerContainerSummary[]> 
       networks,
       managedByPanel:
         c.Labels?.['sokkan.managed'] === 'true' || c.Labels?.['sokanyar.managed'] === 'true',
+      ownerUserId: c.Labels?.['sokkan.owner'],
+      projectSlug: c.Labels?.['sokkan.project'],
+      serviceSlug: c.Labels?.['sokkan.service'],
     };
   });
 }
@@ -220,13 +227,17 @@ export async function performContainerAction(
 }
 
 function stripDockerMultiplexHeader(buf: Buffer): string {
-  // Docker multiplexed stream uses 8-byte frames when TTY is false: [type, 0, 0, 0, size(4 BE)]
   const lines: string[] = [];
   let offset = 0;
   let looksMultiplexed = true;
   while (offset + 8 <= buf.length) {
     const streamType = buf[offset];
-    if ((streamType !== 1 && streamType !== 2 && streamType !== 0) || buf[offset + 1] !== 0 || buf[offset + 2] !== 0 || buf[offset + 3] !== 0) {
+    if (
+      (streamType !== 1 && streamType !== 2 && streamType !== 0) ||
+      buf[offset + 1] !== 0 ||
+      buf[offset + 2] !== 0 ||
+      buf[offset + 3] !== 0
+    ) {
       looksMultiplexed = false;
       break;
     }
@@ -320,20 +331,384 @@ export async function getContainerStats(containerId: string): Promise<ContainerS
   return { cpuPercent, memUsedMb, memLimitMb, memPercent };
 }
 
-export async function ensureDockerNetwork(networkName: string): Promise<void> {
+export interface DockerNetworkContainerMember {
+  id: string;
+  name: string;
+  ipv4Address: string;
+}
+
+export interface DockerNetworkInspect {
+  id: string;
+  name: string;
+  driver: string;
+  internal: boolean;
+  subnet: string;
+  containers: DockerNetworkContainerMember[];
+}
+
+interface RawDockerNetwork {
+  Id?: string;
+  Name?: string;
+  Driver?: string;
+  Internal?: boolean;
+  IPAM?: { Config?: Array<{ Subnet?: string }> };
+  Containers?: Record<
+    string,
+    {
+      Name?: string;
+      IPv4Address?: string;
+    }
+  >;
+}
+
+export async function inspectDockerNetwork(networkName: string): Promise<DockerNetworkInspect | null> {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(networkName)) {
+    return null;
+  }
+  try {
+    const res = await dockerRequest<RawDockerNetwork>(
+      'GET',
+      `/networks/${encodeURIComponent(networkName)}`,
+    );
+    if (res.status !== 200 || !res.data || !res.data.Name) {
+      return null;
+    }
+    const containers = Object.entries(res.data.Containers ?? {}).map(([id, info]) => ({
+      id,
+      name: info.Name ?? id.slice(0, 12),
+      ipv4Address: (info.IPv4Address ?? '').split('/')[0],
+    }));
+    const subnet = res.data.IPAM?.Config?.[0]?.Subnet ?? '';
+    return {
+      id: res.data.Id ?? '',
+      name: res.data.Name,
+      driver: res.data.Driver ?? 'bridge',
+      internal: Boolean(res.data.Internal),
+      subnet,
+      containers,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function createDockerNetwork(
+  networkName: string,
+  options?: { internal?: boolean; subnet?: string; ownerUserId?: string },
+): Promise<void> {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(networkName)) {
+    throw new Error('نام شبکه داکر نامعتبر است.');
+  }
+  const existing = await inspectDockerNetwork(networkName);
+  if (existing) {
+    return;
+  }
+
+  const body: Record<string, unknown> = {
+    Name: networkName,
+    Driver: 'bridge',
+    CheckDuplicate: true,
+    Internal: Boolean(options?.internal),
+    Labels: {
+      'sokkan.managed': 'true',
+      ...(options?.ownerUserId ? { 'sokkan.owner': options.ownerUserId } : {}),
+    },
+  };
+
+  if (options?.subnet?.trim()) {
+    body.IPAM = {
+      Driver: 'default',
+      Config: [{ Subnet: options.subnet.trim() }],
+    };
+  }
+
+  const res = await dockerRequest<{ message?: string }>('POST', '/networks/create', body, 8000);
+  if (res.status >= 400) {
+    const msg =
+      res.data && typeof res.data === 'object' && 'message' in res.data && res.data.message
+        ? String(res.data.message)
+        : `ایجاد شبکه داکر ناموفق بود (${res.status})`;
+    throw new Error(msg);
+  }
+}
+
+export async function ensureDockerNetwork(
+  networkName: string,
+  options?: { internal?: boolean; subnet?: string; ownerUserId?: string },
+): Promise<void> {
   if (!/^[a-zA-Z0-9_.-]+$/.test(networkName)) {
     return;
   }
-  const res = await dockerRequest<Array<{ Name: string }>>('GET', '/networks');
-  if (res.status === 200 && Array.isArray(res.data)) {
-    if (res.data.some((n) => n.Name === networkName)) {
-      return;
-    }
+  const existing = await inspectDockerNetwork(networkName);
+  if (existing) {
+    return;
   }
-  await dockerRequest('POST', '/networks/create', {
-    Name: networkName,
-    Driver: 'bridge',
+  await createDockerNetwork(networkName, options).catch(() => {});
+}
+
+export async function connectContainerToNetwork(
+  containerNameOrId: string,
+  networkName: string,
+  aliases?: string[],
+): Promise<boolean> {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(containerNameOrId) || !/^[a-zA-Z0-9_.-]+$/.test(networkName)) {
+    return false;
+  }
+  try {
+    const inspect = await inspectDockerNetwork(networkName);
+    if (
+      inspect &&
+      inspect.containers.some(
+        (c) => c.name === containerNameOrId || c.id === containerNameOrId,
+      )
+    ) {
+      return true;
+    }
+
+    const endpointConfig: Record<string, unknown> = {};
+    const cleanAliases = (aliases ?? []).filter((a) => /^[a-zA-Z0-9_.-]+$/.test(a));
+    if (cleanAliases.length > 0) {
+      endpointConfig.Aliases = cleanAliases;
+    }
+
+    const res = await dockerRequest<unknown>(
+      'POST',
+      `/networks/${encodeURIComponent(networkName)}/connect`,
+      {
+        Container: containerNameOrId,
+        EndpointConfig: endpointConfig,
+      },
+      6000,
+    );
+    return res.status < 400 || res.status === 403 || res.status === 409;
+  } catch {
+    return false;
+  }
+}
+
+export async function disconnectContainerFromNetwork(
+  containerNameOrId: string,
+  networkName: string,
+): Promise<void> {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(containerNameOrId) || !/^[a-zA-Z0-9_.-]+$/.test(networkName)) {
+    return;
+  }
+  try {
+    await dockerRequest<unknown>(
+      'POST',
+      `/networks/${encodeURIComponent(networkName)}/disconnect`,
+      {
+        Container: containerNameOrId,
+        Force: true,
+      },
+      6000,
+    );
+  } catch {
+    // Ignore if container or network is not currently attached
+  }
+}
+
+export async function removeDockerNetwork(networkName: string): Promise<void> {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(networkName)) return;
+  if (['bridge', 'host', 'none', 'web'].includes(networkName)) return;
+  const info = await inspectDockerNetwork(networkName);
+  if (!info) return;
+  for (const member of info.containers) {
+    await disconnectContainerFromNetwork(member.id, networkName);
+  }
+  await dockerRequest('DELETE', `/networks/${encodeURIComponent(networkName)}`, undefined, 6000).catch(
+    () => {},
+  );
+}
+
+function tcpProbe(host: string, port: number, timeoutMs = 2500): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    let settled = false;
+    const done = (res: { ok: boolean; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(res);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.on('connect', () => done({ ok: true }));
+    socket.on('timeout', () => done({ ok: false, error: 'TIMEOUT' }));
+    socket.on('error', (err) => done({ ok: false, error: err.message }));
   });
+}
+
+export interface NetworkProbeResult {
+  executionMode: 'vps' | 'sandbox';
+  reachable: boolean;
+  networkName: string;
+  targetHost: string;
+  targetPort: number;
+  resolvedIp: string | null;
+  method: 'GET' | 'POST' | 'TCP';
+  path: string;
+  statusCode: number | null;
+  latencyMs: number;
+  responsePreview: string;
+  message: string;
+}
+
+export async function probeTargetInNetwork(params: {
+  networkName: string;
+  containerName: string;
+  port: number;
+  method: 'GET' | 'POST' | 'TCP';
+  reqPath: string;
+  containerStatusHint?: string;
+}): Promise<NetworkProbeResult> {
+  const start = Date.now();
+  const dockerUp = await isDockerAvailable();
+
+  if (!dockerUp) {
+    return {
+      executionMode: 'sandbox',
+      reachable: true,
+      networkName: params.networkName,
+      targetHost: params.containerName,
+      targetPort: params.port,
+      resolvedIp: '172.28.0.x (پیش‌نمایش)',
+      method: params.method,
+      path: params.reqPath,
+      statusCode: params.method === 'TCP' ? null : 200,
+      latencyMs: Date.now() - start,
+      responsePreview: `حالت پیش‌نمایش بدون داکر: مسیر داخلی ${params.containerName}:${params.port}${params.method === 'TCP' ? '' : params.reqPath} روی شبکه ${params.networkName} آماده استفاده بین کانتینرها است.`,
+      message: `اتصال داخلی روی شبکه ${params.networkName} معتبر است (در VPS واقعی درخواست مستقیم به کانتینر ارسال می‌شود).`,
+    };
+  }
+
+  const netInfo = await inspectDockerNetwork(params.networkName);
+  const member = netInfo?.containers.find((c) => c.name === params.containerName);
+  if (!netInfo) {
+    return {
+      executionMode: 'vps',
+      reachable: false,
+      networkName: params.networkName,
+      targetHost: params.containerName,
+      targetPort: params.port,
+      resolvedIp: null,
+      method: params.method,
+      path: params.reqPath,
+      statusCode: null,
+      latencyMs: Date.now() - start,
+      responsePreview: '',
+      message: `شبکه داکر «${params.networkName}» هنوز روی میزبان ساخته نشده است.`,
+    };
+  }
+
+  if (!member || !member.ipv4Address) {
+    return {
+      executionMode: 'vps',
+      reachable: false,
+      networkName: params.networkName,
+      targetHost: params.containerName,
+      targetPort: params.port,
+      resolvedIp: null,
+      method: params.method,
+      path: params.reqPath,
+      statusCode: null,
+      latencyMs: Date.now() - start,
+      responsePreview: '',
+      message: `کانتینر «${params.containerName}» در حال حاضر به شبکه «${params.networkName}» متصل نیست یا در حال اجرا نمی‌باشد.`,
+    };
+  }
+
+  // Inspect container running state so isolated networks (not directly routed to sokkan-panel) report accurately
+  let containerRunning = false;
+  try {
+    const inspectRes = await dockerRequest<{ State?: { Running?: boolean } }>(
+      'GET',
+      `/containers/${encodeURIComponent(params.containerName)}/json`,
+      undefined,
+      3000,
+    );
+    containerRunning = Boolean(inspectRes.status === 200 && inspectRes.data?.State?.Running);
+  } catch {
+    containerRunning = false;
+  }
+
+  // Test TCP / HTTP directly to container IPv4 when reachable from host/sokkan-panel network
+  const tcpRes = await tcpProbe(member.ipv4Address, params.port, 2500);
+  if (params.method === 'TCP') {
+    const latencyMs = Date.now() - start;
+    const isolatedRunning = !tcpRes.ok && containerRunning;
+    return {
+      executionMode: 'vps',
+      reachable: tcpRes.ok || isolatedRunning,
+      networkName: params.networkName,
+      targetHost: params.containerName,
+      targetPort: params.port,
+      resolvedIp: member.ipv4Address,
+      method: 'TCP',
+      path: '',
+      statusCode: null,
+      latencyMs,
+      responsePreview: tcpRes.ok
+        ? `TCP handshake OK -> ${params.containerName} (${member.ipv4Address}:${params.port})`
+        : isolatedRunning
+          ? `Container running inside isolated network ${params.networkName} (${member.ipv4Address}:${params.port}). Direct panel bridge blocked by network isolation.`
+          : `TCP error: ${tcpRes.error || 'Connection refused'}`,
+      message: tcpRes.ok
+        ? `پورت ${params.port} روی کانتینر ${params.containerName} (${member.ipv4Address}) در شبکه ${params.networkName} پاسخ داد.`
+        : isolatedRunning
+          ? `کانتینر ${params.containerName} داخل شبکه ایزوله ${params.networkName} فعال و متصل است (${member.ipv4Address})؛ کانتینرهای هم‌شبکه از طریق ${params.containerName}:${params.port} مستقیماً به آن متصل می‌شوند.`
+          : `اتصال TCP به ${member.ipv4Address}:${params.port} برقرار نشد (${tcpRes.error || 'کانتینر متوقف یا پورت بسته'}).`,
+    };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const targetUrl = `http://${member.ipv4Address}:${params.port}${params.reqPath}`;
+    const res = await fetch(targetUrl, {
+      method: params.method,
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const bodyText = (await res.text()).slice(0, 600);
+    return {
+      executionMode: 'vps',
+      reachable: true,
+      networkName: params.networkName,
+      targetHost: params.containerName,
+      targetPort: params.port,
+      resolvedIp: member.ipv4Address,
+      method: params.method,
+      path: params.reqPath,
+      statusCode: res.status,
+      latencyMs: Date.now() - start,
+      responsePreview: bodyText || `(پاسخ خالی با کد ${res.status})`,
+      message: `درخواست ${params.method} به ${params.containerName}:${params.port}${params.reqPath} با کد ${res.status} پاسخ گرفت.`,
+    };
+  } catch (err) {
+    const isolatedRunning = !tcpRes.ok && containerRunning;
+    return {
+      executionMode: 'vps',
+      reachable: tcpRes.ok || isolatedRunning,
+      networkName: params.networkName,
+      targetHost: params.containerName,
+      targetPort: params.port,
+      resolvedIp: member.ipv4Address,
+      method: params.method,
+      path: params.reqPath,
+      statusCode: null,
+      latencyMs: Date.now() - start,
+      responsePreview: isolatedRunning
+        ? `Container running inside isolated network ${params.networkName} (${member.ipv4Address}:${params.port})`
+        : err instanceof Error
+          ? err.message
+          : 'Request failed',
+      message: tcpRes.ok
+        ? `پورت TCP باز است اما درخواست HTTP کامل نشد (احتمالاً پروتکل سرویس غیرHTTP است).`
+        : isolatedRunning
+          ? `کانتینر ${params.containerName} داخل شبکه ایزوله ${params.networkName} فعال است؛ به دلیل ایزولاسیون، پنل مسیر مستقیم ندارد اما سرویس‌های هم‌شبکه از طریق ${params.containerName}:${params.port} به آن دسترسی دارند.`
+          : `ارتباط مستقیم از پنل به IP داخلی ${member.ipv4Address} برقرار نشد؛ سرویس‌ها داخل شبکه ${params.networkName} از طریق نام میزبان ${params.containerName}:${params.port} به هم متصل می‌شوند.`,
+    };
+  }
 }
 
 export interface HostMetrics {
@@ -458,4 +833,3 @@ export async function pruneDockerUnused(): Promise<{ reclaimedSummary: string }>
     reclaimedSummary: lines.join(' | ').trim() || 'پاک‌سازی ایمیج‌ها و کش بیلد بلااستفاده انجام شد.',
   };
 }
-

@@ -5,12 +5,14 @@ import { promisify } from 'node:util';
 import {
   DEFAULT_CADDYFILE,
   db,
+  getResourcePrivateNetworks,
   getSetting,
   setSetting,
   type CaddySnapshotRow,
   type ProjectRow,
   type ServiceRow,
 } from './db.ts';
+import { connectContainerToNetwork, ensureDockerNetwork, isDockerAvailable } from './docker.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -197,6 +199,7 @@ export async function validateCaddyfile(
           method: 'POST',
           headers: { 'Content-Type': 'text/caddyfile' },
           body: content,
+          signal: AbortSignal.timeout(8000),
         });
         if (!res.ok) {
           const msg = await res.text();
@@ -300,6 +303,7 @@ export async function applyCaddyfile(
         method: 'POST',
         headers: { 'Content-Type': 'text/caddyfile' },
         body: content,
+        signal: AbortSignal.timeout(8000),
       });
       if (!res.ok) {
         const errText = await res.text();
@@ -354,9 +358,44 @@ export async function applyCaddyfile(
   };
 }
 
+export async function ensureCaddyNetworkBridge(
+  projects: ProjectRow[],
+  services: ServiceRow[],
+): Promise<void> {
+  const dockerUp = await isDockerAvailable();
+  if (!dockerUp) return;
+  const caddyContainer = getCaddyContainerName();
+  const netNames = new Set<string>();
+
+  for (const p of projects) {
+    if (p.caddy_enabled === 1 && p.domain.trim()) {
+      for (const n of getResourcePrivateNetworks('project', p.id, p.private_network_id)) {
+        if (n.internal_only === 0) {
+          netNames.add(n.docker_name);
+        }
+      }
+    }
+  }
+  for (const s of services) {
+    if (s.caddy_enabled === 1 && s.domain.trim()) {
+      for (const n of getResourcePrivateNetworks('service', s.id, s.private_network_id)) {
+        if (n.internal_only === 0) {
+          netNames.add(n.docker_name);
+        }
+      }
+    }
+  }
+
+  for (const netName of netNames) {
+    await ensureDockerNetwork(netName);
+    await connectContainerToNetwork(caddyContainer, netName);
+  }
+}
+
 export async function syncProjectsToCaddyfile(note = 'همگام‌سازی خودکار مسیرهای پروژه'): Promise<void> {
   const projects = db.prepare('SELECT * FROM projects ORDER BY created_at ASC').all() as ProjectRow[];
   const services = db.prepare('SELECT * FROM services ORDER BY created_at ASC').all() as ServiceRow[];
+  await ensureCaddyNetworkBridge(projects, services).catch(() => {});
   const current = getSetting('caddyfile_content') ?? DEFAULT_CADDYFILE;
   const next = mergeManagedRoutesIntoCaddyfile(current, projects, services);
   if (next !== current) {

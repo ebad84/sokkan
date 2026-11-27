@@ -18,9 +18,10 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { apiFetch } from '../api';
-import type { DeployedService, ServiceTemplate } from '../types';
+import type { DeployedService, PrivateNetwork, ServiceTemplate } from '../types';
 
 interface TemplatesPageProps {
+  networks: PrivateNetwork[];
   onServiceChanged: () => void;
 }
 
@@ -31,7 +32,7 @@ const CATEGORY_LABELS: Record<'all' | 'database' | 'app' | 'tool', string> = {
   tool: 'ابزارهای مدیریت',
 };
 
-export function TemplatesPage({ onServiceChanged }: TemplatesPageProps) {
+export function TemplatesPage({ networks, onServiceChanged }: TemplatesPageProps) {
   const [templates, setTemplates] = useState<ServiceTemplate[]>([]);
   const [services, setServices] = useState<DeployedService[]>([]);
   const [loading, setLoading] = useState(true);
@@ -44,6 +45,7 @@ export function TemplatesPage({ onServiceChanged }: TemplatesPageProps) {
   const [installName, setInstallName] = useState('');
   const [installSlug, setInstallSlug] = useState('');
   const [installDomain, setInstallDomain] = useState('');
+  const [installNetworkId, setInstallNetworkId] = useState('');
   const [installCaddy, setInstallCaddy] = useState(true);
   const [installMemMb, setInstallMemMb] = useState(256);
   const [installEnv, setInstallEnv] = useState<Record<string, string>>({});
@@ -102,6 +104,7 @@ export function TemplatesPage({ onServiceChanged }: TemplatesPageProps) {
     }
     setInstallSlug(candidateSlug);
     setInstallDomain('');
+    setInstallNetworkId(networks[0]?.id ?? '');
     setInstallCaddy(tpl.supportsDomain);
     setInstallMemMb(tpl.defaultMemLimitMb);
     const initialEnv: Record<string, string> = {};
@@ -128,6 +131,7 @@ export function TemplatesPage({ onServiceChanged }: TemplatesPageProps) {
           name: installName,
           slug: installSlug,
           domain: selectedTemplate.supportsDomain ? installDomain : '',
+          privateNetworkId: installNetworkId || null,
           caddyEnabled: selectedTemplate.supportsDomain && installCaddy && Boolean(installDomain.trim()),
           memLimitMb: installMemMb,
           envVars: installEnv,
@@ -269,7 +273,7 @@ export function TemplatesPage({ onServiceChanged }: TemplatesPageProps) {
             <div>
               <h2 className="text-sm font-semibold text-slate-100">سرویس‌های نصب‌شده روی سرور</h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                دیتابیس‌ها و اپ‌های آماده روی شبکه داخلی <span className="font-mono text-slate-300">web</span> با Volume دائمی
+                دیتابیس‌ها و اپ‌های آماده روی شبکه خصوصی انتخاب‌شده یا شبکه <span className="font-mono text-slate-300">web</span> با Volume دائمی
               </p>
             </div>
             <button
@@ -314,6 +318,14 @@ export function TemplatesPage({ onServiceChanged }: TemplatesPageProps) {
                       <span>{svc.image}</span>
                       <span>·</span>
                       <span>RAM ≤ {svc.memLimitMb}MB</span>
+                      {svc.networks && svc.networks.length > 0 && (
+                        <>
+                          <span>·</span>
+                          <span className="text-sky-400 font-sans">
+                            شبکه: {svc.networks.map((n) => n.name).join('، ')}
+                          </span>
+                        </>
+                      )}
                       {svc.domain && (
                         <>
                           <span>·</span>
@@ -602,9 +614,25 @@ export function TemplatesPage({ onServiceChanged }: TemplatesPageProps) {
                   </div>
                 ) : (
                   <div className="bg-[#0B0F17] border border-[#1F2937] rounded-lg p-3 text-[11px] text-slate-400 leading-relaxed">
-                    این دیتابیس برای امنیت بیشتر فقط روی شبکه داخلی <span className="font-mono text-slate-300">web</span> اجرا می‌شود و روی اینترنت باز نمی‌شود.
+                    این دیتابیس برای امنیت بیشتر فقط روی شبکه داخلی انتخاب‌شده اجرا می‌شود و روی اینترنت باز نمی‌شود.
                   </div>
                 )}
+              </div>
+
+              <div>
+                <label className="block text-slate-300 mb-1">شبکه خصوصی / شبکه اجرایی</label>
+                <select
+                  value={installNetworkId}
+                  onChange={(e) => setInstallNetworkId(e.target.value)}
+                  className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-sky-500"
+                >
+                  <option value="">شبکه پیش‌فرض سرور (web)</option>
+                  {networks.map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {n.name} ({n.dockerName})
+                    </option>
+                  ))}
+                </select>
               </div>
 
               {selectedTemplate.supportsDomain && (

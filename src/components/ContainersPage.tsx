@@ -4,10 +4,11 @@ import { apiFetch } from '../api';
 import type { DockerContainer, DockerDiskCategory, NavTab } from '../types';
 
 interface ContainersPageProps {
+  isAdmin: boolean;
   onNavigate: (tab: NavTab) => void;
 }
 
-export function ContainersPage({ onNavigate }: ContainersPageProps) {
+export function ContainersPage({ isAdmin, onNavigate }: ContainersPageProps) {
   const [dockerAvailable, setDockerAvailable] = useState(true);
   const [containers, setContainers] = useState<DockerContainer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,12 +37,16 @@ export function ContainersPage({ onNavigate }: ContainersPageProps) {
     setLoading(true);
     setError('');
     try {
-      const [res, df] = await Promise.all([
-        apiFetch<{ dockerAvailable: boolean; containers: DockerContainer[] }>('/api/containers'),
-        apiFetch<{ dockerAvailable: boolean; categories: DockerDiskCategory[] }>(
-          '/api/docker/disk-usage',
-        ).catch(() => ({ dockerAvailable: false, categories: [] })),
-      ]);
+      const resPromise = apiFetch<{ dockerAvailable: boolean; containers: DockerContainer[] }>(
+        '/api/containers',
+      );
+      const dfPromise = isAdmin
+        ? apiFetch<{ dockerAvailable: boolean; categories: DockerDiskCategory[] }>(
+            '/api/docker/disk-usage',
+          ).catch(() => ({ dockerAvailable: false, categories: [] }))
+        : Promise.resolve({ dockerAvailable: false, categories: [] as DockerDiskCategory[] });
+
+      const [res, df] = await Promise.all([resPromise, dfPromise]);
       setDockerAvailable(res.dockerAvailable);
       setContainers(res.containers);
       setDiskCategories(df.categories);
@@ -50,7 +55,7 @@ export function ContainersPage({ onNavigate }: ContainersPageProps) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     void loadContainers();
@@ -144,17 +149,19 @@ export function ContainersPage({ onNavigate }: ContainersPageProps) {
             به محض اجرای همین پنل روی VPS با فایل Compose تولیدشده، تمام کانتینرهای سرور (سرویس‌های دیپلوی‌شده، Caddy و ...)
             در این بخش بدون نیاز به Portainer قابل کنترل، ری‌استارت و مشاهده لاگ خواهند بود.
           </p>
-          <button
-            type="button"
-            onClick={() => onNavigate('provisioning')}
-            className="px-4 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-lg cursor-pointer"
-          >
-            مشاهده فایل‌های نصب روی VPS
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => onNavigate('provisioning')}
+              className="px-4 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-lg cursor-pointer"
+            >
+              مشاهده فایل‌های نصب روی VPS
+            </button>
+          )}
         </div>
       )}
 
-      {dockerAvailable && (
+      {dockerAvailable && isAdmin && (
         <div className="bg-[#111827] border border-[#1F2937] rounded-xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div className="space-y-1.5">
             <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
