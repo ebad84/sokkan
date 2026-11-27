@@ -197,15 +197,53 @@ app.post(
         return;
       }
 
-      const payload = JSON.parse(rawBody.toString('utf8')) as { ref?: string };
+      const payload = JSON.parse(rawBody.toString('utf8')) as {
+        ref?: string;
+        source?: string;
+        action?: string;
+        workflow_run?: { conclusion?: string; head_branch?: string };
+      };
       const expectedRef = `refs/heads/${project.branch}`;
-      if (payload.ref && payload.ref !== expectedRef) {
-        res.json({
-          ok: true,
-          ignored: true,
-          message: `رویداد مربوط به شاخه ${payload.ref} نادیده گرفته شد (شاخه هدف: ${expectedRef}).`,
-        });
-        return;
+
+      if (eventType === 'workflow_run') {
+        if (payload.action !== 'completed' || payload.workflow_run?.conclusion !== 'success') {
+          res.json({
+            ok: true,
+            ignored: true,
+            message: 'رویداد workflow_run هنوز به پایان موفق نرسیده است.',
+          });
+          return;
+        }
+        if (payload.workflow_run?.head_branch && payload.workflow_run.head_branch !== project.branch) {
+          res.json({
+            ok: true,
+            ignored: true,
+            message: `شاخه ${payload.workflow_run.head_branch} با شاخه هدف (${project.branch}) تطابق ندارد.`,
+          });
+          return;
+        }
+      } else {
+        const isActionsTrigger =
+          eventType === 'github_actions_deploy' ||
+          eventType === 'workflow_dispatch' ||
+          payload.source === 'github_actions';
+        if (project.deploy_strategy === 'github_actions' && !isActionsTrigger) {
+          res.json({
+            ok: true,
+            ignored: true,
+            message:
+              'این پروژه در حالت GitHub Actions است؛ رویداد push خام نادیده گرفته شد تا پس از پایان بیلد اکشنز دیپلوی اجرا شود.',
+          });
+          return;
+        }
+        if (payload.ref && payload.ref !== expectedRef) {
+          res.json({
+            ok: true,
+            ignored: true,
+            message: `رویداد مربوط به شاخه ${payload.ref} نادیده گرفته شد (شاخه هدف: ${expectedRef}).`,
+          });
+          return;
+        }
       }
 
       const deployment = await triggerDeployment(project.id, 'webhook');
@@ -248,6 +286,9 @@ function serializeProject(p: ProjectRow) {
     repoUrl: p.repo_url,
     branch: p.branch,
     buildMode: p.build_mode,
+    deployStrategy: p.deploy_strategy === 'github_actions' ? 'github_actions' : 'local',
+    ghcrImage: p.ghcr_image || '',
+    actionsComposeFile: p.actions_compose_file || '',
     buildFilePath: p.build_file_path,
     dockerfileContext: p.dockerfile_context,
     containerPort: p.container_port,
@@ -1565,6 +1606,14 @@ app.post('/api/projects', requireAuth, async (req: AuthenticatedRequest, res) =>
 
     const branch = validateBranchName(String(body.branch || 'main'));
     const buildMode = body.buildMode === 'compose' ? 'compose' : 'dockerfile';
+    const deployStrategy = body.deployStrategy === 'github_actions' ? 'github_actions' : 'local';
+    const ghcrImage = typeof body.ghcrImage === 'string' ? body.ghcrImage.trim() : '';
+    if (ghcrImage && (!/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,255}$/.test(ghcrImage) || ghcrImage.includes('..'))) {
+      res.status(400).json({ error: 'فرمت آدرس ایمیج GHCR نامعتبر است.' });
+      return;
+    }
+    const actionsComposeFile =
+      typeof body.actionsComposeFile === 'string' ? body.actionsComposeFile.trim() : '';
     const buildFilePath = String(body.buildFilePath || (buildMode === 'compose' ? 'docker-compose.yml' : 'Dockerfile')).trim();
     const dockerfileContext = String(body.dockerfileContext || '.').trim();
     const containerPort = Number(body.containerPort || 3000);
@@ -1624,11 +1673,12 @@ app.post('/api/projects', requireAuth, async (req: AuthenticatedRequest, res) =>
 
     db.prepare(
       `INSERT INTO projects (
-        id, name, slug, repo_url, branch, build_mode, build_file_path, dockerfile_context,
+        id, name, slug, repo_url, branch, build_mode, deploy_strategy, ghcr_image, actions_compose_file,
+        build_file_path, dockerfile_context,
         container_port, domain, caddy_enabled, caddy_extra_directives, auto_deploy_webhook,
         polling_interval_sec, github_token_enc, webhook_secret_enc, env_vars_enc,
         last_commit_sha, last_commit_msg, status, owner_user_id, private_network_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?)`,
     ).run(
       id,
       name,
@@ -1636,6 +1686,9 @@ app.post('/api/projects', requireAuth, async (req: AuthenticatedRequest, res) =>
       canonicalUrl,
       branch,
       buildMode,
+      deployStrategy,
+      ghcrImage,
+      actionsComposeFile,
       buildFilePath,
       dockerfileContext,
       containerPort,
@@ -1702,6 +1755,20 @@ app.patch('/api/projects/:id', requireAuth, async (req: AuthenticatedRequest, re
       body.buildMode === 'compose' || body.buildMode === 'dockerfile'
         ? body.buildMode
         : existing.build_mode;
+    const deployStrategy =
+      body.deployStrategy === 'github_actions' || body.deployStrategy === 'local'
+        ? body.deployStrategy
+        : existing.deploy_strategy || 'local';
+    const ghcrImage =
+      body.ghcrImage !== undefined ? String(body.ghcrImage).trim() : existing.ghcr_image || '';
+    if (ghcrImage && (!/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,255}$/.test(ghcrImage) || ghcrImage.includes('..'))) {
+      res.status(400).json({ error: 'فرمت آدرس ایمیج GHCR نامعتبر است.' });
+      return;
+    }
+    const actionsComposeFile =
+      body.actionsComposeFile !== undefined
+        ? String(body.actionsComposeFile).trim()
+        : existing.actions_compose_file || '';
     const buildFilePath =
       body.buildFilePath !== undefined ? String(body.buildFilePath).trim() : existing.build_file_path;
     const containerPort =
@@ -1790,7 +1857,8 @@ app.patch('/api/projects/:id', requireAuth, async (req: AuthenticatedRequest, re
     const now = new Date().toISOString();
     db.prepare(
       `UPDATE projects SET
-        name = ?, branch = ?, build_mode = ?, build_file_path = ?, container_port = ?,
+        name = ?, branch = ?, build_mode = ?, deploy_strategy = ?, ghcr_image = ?, actions_compose_file = ?,
+        build_file_path = ?, container_port = ?,
         domain = ?, caddy_enabled = ?, caddy_extra_directives = ?, auto_deploy_webhook = ?,
         polling_interval_sec = ?, github_token_enc = ?, webhook_secret_enc = ?, env_vars_enc = ?,
         private_network_id = ?, updated_at = ?
@@ -1799,6 +1867,9 @@ app.patch('/api/projects/:id', requireAuth, async (req: AuthenticatedRequest, re
       name,
       branch,
       buildMode,
+      deployStrategy,
+      ghcrImage,
+      actionsComposeFile,
       buildFilePath,
       containerPort,
       domain,
@@ -2620,6 +2691,9 @@ function buildFullBackupPayload(): Record<string, unknown> {
         repoUrl: p.repo_url,
         branch: p.branch,
         buildMode: p.build_mode,
+        deployStrategy: p.deploy_strategy || 'local',
+        ghcrImage: p.ghcr_image || '',
+        actionsComposeFile: p.actions_compose_file || '',
         buildFilePath: p.build_file_path,
         dockerfileContext: p.dockerfile_context,
         containerPort: p.container_port,
@@ -3002,12 +3076,13 @@ app.post('/api/backup/import', requireAuth, requireAdmin, async (req: Authentica
 
         db.prepare(
           `INSERT INTO projects (
-            id, name, slug, repo_url, branch, build_mode, build_file_path, dockerfile_context,
+            id, name, slug, repo_url, branch, build_mode, deploy_strategy, ghcr_image, actions_compose_file,
+            build_file_path, dockerfile_context,
             container_port, domain, caddy_enabled, caddy_extra_directives, auto_deploy_webhook,
             polling_interval_sec, github_token_enc, webhook_secret_enc, env_vars_enc,
             last_commit_sha, last_commit_msg, last_deployed_at, status, owner_user_id, private_network_id,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?)`,
         ).run(
           id,
           String(rawProj.name || slug),
@@ -3015,6 +3090,9 @@ app.post('/api/backup/import', requireAuth, requireAdmin, async (req: Authentica
           canonicalUrl,
           branch,
           rawProj.buildMode === 'compose' ? 'compose' : 'dockerfile',
+          rawProj.deployStrategy === 'github_actions' ? 'github_actions' : 'local',
+          typeof rawProj.ghcrImage === 'string' ? rawProj.ghcrImage.trim() : '',
+          typeof rawProj.actionsComposeFile === 'string' ? rawProj.actionsComposeFile.trim() : '',
           String(rawProj.buildFilePath || 'Dockerfile'),
           String(rawProj.dockerfileContext || '.'),
           Number.isInteger(port) && port > 0 && port <= 65535 ? port : 3000,

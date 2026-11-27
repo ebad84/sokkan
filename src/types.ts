@@ -213,6 +213,9 @@ export interface Project {
   repoUrl: string;
   branch: string;
   buildMode: 'dockerfile' | 'compose';
+  deployStrategy: 'local' | 'github_actions';
+  ghcrImage: string;
+  actionsComposeFile: string;
   buildFilePath: string;
   dockerfileContext: string;
   containerPort: number;

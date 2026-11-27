@@ -16,6 +16,115 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiFetch, streamDeploymentLogs } from '../api';
 import type { Deployment, GitHubInspectionResult, PrivateNetwork, Project } from '../types';
 
+function extractOwnerRepoFromUrl(rawUrl: string): { owner: string; repo: string } | null {
+  const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
+  if (!trimmed) return null;
+  const normalized = trimmed
+    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+    .replace(/^git@github\.com:/i, '');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  return { owner: parts[0].trim().toLowerCase(), repo: parts[1].trim().toLowerCase() };
+}
+
+function buildSampleActionsWorkflow(opts: {
+  branch: string;
+  buildMode: 'dockerfile' | 'compose';
+  buildFilePath: string;
+  ghcrImage: string;
+  repoUrl: string;
+}): string {
+  const parsed = extractOwnerRepoFromUrl(opts.repoUrl);
+  const defaultImg = parsed
+    ? `ghcr.io/${parsed.owner}/${parsed.repo}:latest`
+    : 'ghcr.io/OWNER/REPO:latest';
+  const imageRef = opts.ghcrImage.trim() || defaultImg;
+  const branch = opts.branch.trim() || 'main';
+  if (opts.buildMode === 'compose') {
+    return `name: Build & Deploy to Sokkan
+
+on:
+  push:
+    branches: [${branch}]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
+      # ایمیج‌های سرویس‌های خود را بسازید و روی GHCR پوش کنید
+      # سپس docker-compose.ghcr.yml باید از همان ایمیج‌ها با pull_policy: always استفاده کند
+      - name: Trigger Sokkan Deploy
+        if: \${{ secrets.SOKKAN_WEBHOOK_URL != '' && secrets.SOKKAN_WEBHOOK_SECRET != '' }}
+        env:
+          WEBHOOK_URL: \${{ secrets.SOKKAN_WEBHOOK_URL }}
+          WEBHOOK_SECRET: \${{ secrets.SOKKAN_WEBHOOK_SECRET }}
+        run: |
+          BODY="{\"ref\":\"refs/heads/\${GITHUB_REF_NAME}\",\"source\":\"github_actions\",\"sha\":\"\${GITHUB_SHA}\"}"
+          SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -hex | awk '{print $NF}')"
+          curl -fsS -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: github_actions_deploy" \
+            -H "X-Hub-Signature-256: $SIG" \
+            -d "$BODY"`;
+  }
+  const dockerfile = opts.buildFilePath.trim() || 'Dockerfile';
+  return `name: Build & Deploy to Sokkan
+
+on:
+  push:
+    branches: [${branch}]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${dockerfile}
+          push: true
+          tags: ${imageRef}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Trigger Sokkan Deploy
+        if: \${{ secrets.SOKKAN_WEBHOOK_URL != '' && secrets.SOKKAN_WEBHOOK_SECRET != '' }}
+        env:
+          WEBHOOK_URL: \${{ secrets.SOKKAN_WEBHOOK_URL }}
+          WEBHOOK_SECRET: \${{ secrets.SOKKAN_WEBHOOK_SECRET }}
+        run: |
+          BODY="{\"ref\":\"refs/heads/\${GITHUB_REF_NAME}\",\"source\":\"github_actions\",\"sha\":\"\${GITHUB_SHA}\"}"
+          SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -hex | awk '{print $NF}')"
+          curl -fsS -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: github_actions_deploy" \
+            -H "X-Hub-Signature-256: $SIG" \
+            -d "$BODY"`;
+}
+
 function extractRepoNameFromUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
   if (!trimmed) return '';
@@ -234,6 +343,9 @@ export function ProjectsPage({
   const [slugTouched, setSlugTouched] = useState(false);
   const [branch, setBranch] = useState('main');
   const [buildMode, setBuildMode] = useState<'dockerfile' | 'compose'>('dockerfile');
+  const [deployStrategy, setDeployStrategy] = useState<'local' | 'github_actions'>('local');
+  const [ghcrImage, setGhcrImage] = useState('');
+  const [actionsComposeFile, setActionsComposeFile] = useState('docker-compose.ghcr.yml');
   const [buildFilePath, setBuildFilePath] = useState('Dockerfile');
   const [containerPort, setContainerPort] = useState(3000);
   const [domain, setDomain] = useState('');
@@ -256,6 +368,10 @@ export function ProjectsPage({
   const [editDomain, setEditDomain] = useState('');
   const [editPort, setEditPort] = useState(3000);
   const [editBranch, setEditBranch] = useState('main');
+  const [editDeployStrategy, setEditDeployStrategy] = useState<'local' | 'github_actions'>('local');
+  const [editGhcrImage, setEditGhcrImage] = useState('');
+  const [editActionsComposeFile, setEditActionsComposeFile] = useState('');
+  const [editGithubToken, setEditGithubToken] = useState('');
   const [editPrivateNetworkId, setEditPrivateNetworkId] = useState('');
   const [editPolling, setEditPolling] = useState(300);
   const [editWebhook, setEditWebhook] = useState(true);
@@ -304,6 +420,12 @@ export function ProjectsPage({
       setBranch(res.defaultBranch);
       setBuildMode(res.detectedBuildMode === 'compose' ? 'compose' : 'dockerfile');
       setBuildFilePath(res.detectedBuildFile || 'Dockerfile');
+      if (res.owner && res.repo) {
+        setGhcrImage(`ghcr.io/${res.owner.toLowerCase()}/${res.repo.toLowerCase()}:latest`);
+      }
+      if (res.rootFiles.includes('docker-compose.ghcr.yml')) {
+        setActionsComposeFile('docker-compose.ghcr.yml');
+      }
       if (res.detectedPorts.length > 0) {
         setContainerPort(res.detectedPorts[0]);
       }
@@ -328,6 +450,9 @@ export function ProjectsPage({
     setSlugTouched(false);
     setBranch('main');
     setBuildMode('dockerfile');
+    setDeployStrategy('local');
+    setGhcrImage('');
+    setActionsComposeFile('docker-compose.ghcr.yml');
     setBuildFilePath('Dockerfile');
     setContainerPort(3000);
     setDomain('');
@@ -364,6 +489,9 @@ export function ProjectsPage({
             repoUrl,
             branch,
             buildMode,
+            deployStrategy,
+            ghcrImage,
+            actionsComposeFile,
             buildFilePath,
             containerPort,
             domain,
@@ -429,6 +557,10 @@ export function ProjectsPage({
     setEditDomain(p.domain);
     setEditPort(p.containerPort);
     setEditBranch(p.branch);
+    setEditDeployStrategy(p.deployStrategy === 'github_actions' ? 'github_actions' : 'local');
+    setEditGhcrImage(p.ghcrImage || '');
+    setEditActionsComposeFile(p.actionsComposeFile || '');
+    setEditGithubToken('');
     setEditPrivateNetworkId(p.privateNetworkId ?? '');
     setEditPolling(p.pollingIntervalSec);
     setEditWebhook(p.autoDeployWebhook);
@@ -468,6 +600,10 @@ export function ProjectsPage({
             domain: editDomain,
             containerPort: editPort,
             branch: editBranch,
+            deployStrategy: editDeployStrategy,
+            ghcrImage: editGhcrImage,
+            actionsComposeFile: editActionsComposeFile,
+            ...(editGithubToken.trim() ? { githubToken: editGithubToken.trim() } : {}),
             privateNetworkId: editPrivateNetworkId || null,
             pollingIntervalSec: editPolling,
             autoDeployWebhook: editWebhook,
@@ -673,6 +809,15 @@ export function ProjectsPage({
                     <div className="flex items-center gap-3 flex-wrap">
                       <h3 className="text-sm font-semibold text-slate-100">{p.name}</h3>
                       <span className={`text-xs font-medium ${statusClass}`}>{statusText}</span>
+                      <span
+                        className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                          p.deployStrategy === 'github_actions'
+                            ? 'bg-violet-500/10 text-violet-300 border-violet-500/30'
+                            : 'bg-sky-500/10 text-sky-300 border-sky-500/25'
+                        }`}
+                      >
+                        {p.deployStrategy === 'github_actions' ? 'GitHub Actions · GHCR' : 'VPS BuildKit'}
+                      </span>
                     </div>
 
                     <div className="text-xs text-slate-400 flex items-center gap-2 flex-wrap">
@@ -961,6 +1106,83 @@ export function ProjectsPage({
                 </div>
               </div>
 
+              {/* Deploy Strategy Selector: Local VPS (BuildKit) vs GitHub Actions (GHCR) */}
+              <div className="pt-2 border-t border-[#1F2937] space-y-3">
+                <label className="block text-slate-300 font-medium">محل بیلد ایمیج (استراتژی دیپلوی)</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setDeployStrategy('local')}
+                    className={`text-right p-3 rounded-lg border transition-colors cursor-pointer ${
+                      deployStrategy === 'local'
+                        ? 'bg-sky-500/10 border-sky-500 text-slate-100'
+                        : 'bg-[#0B0F17] border-[#1F2937] text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="font-semibold text-xs">بیلد روی سرور (VPS + BuildKit)</div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      ساخت مستقیم ایمیج روی همین سرور با buildx و کش لایه‌ها
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeployStrategy('github_actions');
+                      setPollingIntervalSec(0);
+                    }}
+                    className={`text-right p-3 rounded-lg border transition-colors cursor-pointer ${
+                      deployStrategy === 'github_actions'
+                        ? 'bg-violet-500/10 border-violet-500 text-slate-100'
+                        : 'bg-[#0B0F17] border-[#1F2937] text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="font-semibold text-xs">بیلد با GitHub Actions (سریع)</div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      بیلد روی گیتهاب و دریافت مستقیم ایمیج آماده از GHCR بدون فشار به VPS
+                    </div>
+                  </button>
+                </div>
+
+                {deployStrategy === 'github_actions' && (
+                  <div className="bg-[#0B0F17] border border-violet-500/25 rounded-lg p-3.5 space-y-2.5">
+                    {buildMode === 'compose' ? (
+                      <div>
+                        <label className="block text-slate-300 mb-1">
+                          فایل Docker Compose مخصوص ایمیج‌های آماده (GHCR)
+                        </label>
+                        <input
+                          type="text"
+                          value={actionsComposeFile}
+                          onChange={(e) => setActionsComposeFile(e.target.value)}
+                          placeholder="docker-compose.ghcr.yml"
+                          className="w-full bg-[#111827] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-violet-500"
+                        />
+                        <p className="mt-1 text-[11px] text-slate-500">
+                          سکان به‌جای بیلد، دستور <span className="font-mono">docker compose pull && up -d --no-build</span> را روی این فایل اجرا می‌کند.
+                        </p>
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-slate-300 mb-1">آدرس ایمیج در GHCR (اختیاری)</label>
+                        <input
+                          type="text"
+                          value={ghcrImage}
+                          onChange={(e) => setGhcrImage(e.target.value)}
+                          placeholder="ghcr.io/username/repo:latest"
+                          className="w-full bg-[#111827] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-violet-500"
+                        />
+                        <p className="mt-1 text-[11px] text-slate-500">
+                          اگر خالی بماند به‌صورت خودکار <span className="font-mono">ghcr.io/owner/repo:latest</span> در نظر گرفته می‌شود.
+                        </p>
+                      </div>
+                    )}
+                    <p className="text-[11px] text-slate-400">
+                      نکته: برای ایمیج‌های خصوصی در GHCR، توکن گیتهاب پروژه باید مجوز <span className="font-mono text-slate-200">read:packages</span> داشته باشد. بعد از ساخت پروژه، فایل آماده Workflow در بخش تنظیمات پروژه قابل کپی است.
+                    </p>
+                  </div>
+                )}
+              </div>
+
               {/* Step 3: Caddy & Automation */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-[#1F2937]">
                 <div>
@@ -1213,6 +1435,127 @@ export function ProjectsPage({
                     className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono tabular-nums"
                   />
                 </div>
+              </div>
+
+              {/* Deploy Strategy Toggle */}
+              <div className="space-y-2.5 pt-2 border-t border-[#1F2937]">
+                <label className="block text-slate-300 font-medium">محل بیلد ایمیج (استراتژی دیپلوی)</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditDeployStrategy('local')}
+                    className={`text-right p-2.5 rounded-lg border transition-colors cursor-pointer ${
+                      editDeployStrategy === 'local'
+                        ? 'bg-sky-500/10 border-sky-500 text-slate-100'
+                        : 'bg-[#0B0F17] border-[#1F2937] text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="font-semibold text-xs">بیلد روی VPS (BuildKit)</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">ساخت محلی روی سرور با buildx</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditDeployStrategy('github_actions')}
+                    className={`text-right p-2.5 rounded-lg border transition-colors cursor-pointer ${
+                      editDeployStrategy === 'github_actions'
+                        ? 'bg-violet-500/10 border-violet-500 text-slate-100'
+                        : 'bg-[#0B0F17] border-[#1F2937] text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="font-semibold text-xs">بیلد با GitHub Actions (GHCR)</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">دریافت ایمیج آماده بدون فشار به VPS</div>
+                  </button>
+                </div>
+
+                {editDeployStrategy === 'github_actions' && (
+                  <div className="bg-[#0B0F17] border border-violet-500/25 rounded-lg p-3 space-y-3">
+                    {editingProject.buildMode === 'compose' ? (
+                      <div>
+                        <label className="block text-slate-300 mb-1">
+                          فایل Compose مخصوص ایمیج‌های آماده (GHCR)
+                        </label>
+                        <input
+                          type="text"
+                          value={editActionsComposeFile}
+                          onChange={(e) => setEditActionsComposeFile(e.target.value)}
+                          placeholder="docker-compose.ghcr.yml"
+                          className="w-full bg-[#111827] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono"
+                        />
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-slate-300 mb-1">آدرس ایمیج در GHCR</label>
+                        <input
+                          type="text"
+                          value={editGhcrImage}
+                          onChange={(e) => setEditGhcrImage(e.target.value)}
+                          placeholder="ghcr.io/username/repo:latest"
+                          className="w-full bg-[#111827] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono"
+                        />
+                      </div>
+                    )}
+                    <div>
+                      <label className="block text-slate-300 mb-1">
+                        به‌روزرسانی توکن گیتهاب (اختیاری — برای Pull خصوصی از GHCR دسترسی read:packages لازم است)
+                      </label>
+                      <input
+                        type="password"
+                        value={editGithubToken}
+                        onChange={(e) => setEditGithubToken(e.target.value)}
+                        placeholder={editingProject.hasGithubToken ? 'توکن فعلی ذخیره شده (برای تغییر وارد کنید)' : 'ghp_... یا github_pat_...'}
+                        className="w-full bg-[#111827] border border-[#1F2937] rounded-lg px-3 py-2 text-slate-100 font-mono"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-violet-300">
+                          نمونه فایل <span className="font-mono">.github/workflows/sokkan-deploy.yml</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            copyText(
+                              'gha-workflow',
+                              buildSampleActionsWorkflow({
+                                branch: editBranch,
+                                buildMode: editingProject.buildMode,
+                                buildFilePath: editingProject.buildFilePath,
+                                ghcrImage: editGhcrImage,
+                                repoUrl: editingProject.repoUrl,
+                              }),
+                            )
+                          }
+                          className="inline-flex items-center gap-1 text-[11px] text-sky-400 hover:text-sky-300 cursor-pointer"
+                        >
+                          {copiedKey === 'gha-workflow' ? (
+                            <>
+                              <Check className="w-3 h-3" /> کپی شد
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" /> کپی YAML
+                            </>
+                          )}
+                        </button>
+                      </div>
+                      <pre
+                        dir="ltr"
+                        className="bg-[#050810] border border-[#1F2937] rounded p-2.5 text-[10px] font-mono text-slate-300 overflow-x-auto max-h-40"
+                      >
+                        {buildSampleActionsWorkflow({
+                          branch: editBranch,
+                          buildMode: editingProject.buildMode,
+                          buildFilePath: editingProject.buildFilePath,
+                          ghcrImage: editGhcrImage,
+                          repoUrl: editingProject.repoUrl,
+                        })}
+                      </pre>
+                      <p className="text-[10px] text-slate-400">
+                        در مخزن گیتهاب (Settings → Secrets → Actions) دو سکرت <span className="font-mono text-slate-200">SOKKAN_WEBHOOK_URL</span> و <span className="font-mono text-slate-200">SOKKAN_WEBHOOK_SECRET</span> را ست کنید تا پایان هر بیلد خودکار روی سکان دیپلوی شود.
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>

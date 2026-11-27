@@ -102,7 +102,13 @@ function runCommandSafe(
     const child = spawn(cmd, args, {
       cwd,
       shell: false,
-      env: { ...process.env, ...(extraEnv ?? {}), GIT_TERMINAL_PROMPT: '0' },
+      env: {
+        ...process.env,
+        DOCKER_BUILDKIT: '1',
+        COMPOSE_DOCKER_CLI_BUILD: '1',
+        ...(extraEnv ?? {}),
+        GIT_TERMINAL_PROMPT: '0',
+      },
     });
 
     child.stdout.on('data', (chunk: Buffer) => {
@@ -121,6 +127,44 @@ function runCommandSafe(
 
     child.on('error', (err) => reject(err));
     child.on('close', (code) => resolve(code ?? 1));
+  });
+}
+
+function validateDockerImageRef(ref: string): string {
+  const trimmed = ref.trim();
+  if (!trimmed || !/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,255}$/.test(trimmed) || trimmed.includes('..')) {
+    throw new Error('آدرس ایمیج داکر (GHCR) نامعتبر است.');
+  }
+  return trimmed;
+}
+
+function dockerLoginGhcr(
+  username: string,
+  token: string,
+  cwd: string,
+  deploymentId: string,
+  secretsToMask: string[] = [],
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', ['login', 'ghcr.io', '-u', username, '--password-stdin'], {
+      cwd,
+      shell: false,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    child.stdout.on('data', (chunk: Buffer) => {
+      for (const l of chunk.toString('utf8').split(/\r?\n/)) {
+        if (l.trim()) appendDeployLog(deploymentId, l, secretsToMask);
+      }
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      for (const l of chunk.toString('utf8').split(/\r?\n/)) {
+        if (l.trim()) appendDeployLog(deploymentId, l, secretsToMask);
+      }
+    });
+    child.on('error', (err) => reject(err));
+    child.on('close', (code) => resolve(code ?? 1));
+    child.stdin.write(token + '\n');
+    child.stdin.end();
   });
 }
 
@@ -201,7 +245,8 @@ async function executePipeline(
 
   try {
     appendDeployLog(deploymentId, `شروع پایپ‌لاین برای «${project.name}» (${project.slug})`);
-    const { canonicalUrl } = parseGitHubRepoUrl(project.repo_url);
+    const { owner, repo, canonicalUrl } = parseGitHubRepoUrl(project.repo_url);
+    const deployStrategy = project.deploy_strategy === 'github_actions' ? 'github_actions' : 'local';
     const branch = validateBranchName(project.branch);
 
     appendDeployLog(deploymentId, `بررسی آخرین کامیت در شاخه ${branch} از گیتهاب...`);
@@ -237,15 +282,30 @@ async function executePipeline(
       const targetNetNames =
         privateNets.length > 0 ? privateNets.map((n) => n.docker_name) : [defaultNet];
       const containerName = `sokkan-${project.slug}`;
-      if (project.build_mode === 'compose') {
+      if (deployStrategy === 'github_actions') {
+        if (project.build_mode === 'compose') {
+          const cf = project.actions_compose_file.trim() || 'docker-compose.ghcr.yml';
+          appendDeployLog(
+            deploymentId,
+            `حالت GitHub Actions (Compose) — دستور معادل روی VPS: docker compose -f ${cf} pull && docker compose -f ${cf} up -d --no-build`,
+          );
+        } else {
+          const img =
+            project.ghcr_image.trim() || `ghcr.io/${owner.toLowerCase()}/${repo.toLowerCase()}:latest`;
+          appendDeployLog(
+            deploymentId,
+            `حالت GitHub Actions (GHCR) — دستور معادل روی VPS: docker pull ${img} && docker run -d --name ${containerName} --network ${targetNetNames[0]} ${img}`,
+          );
+        }
+      } else if (project.build_mode === 'compose') {
         appendDeployLog(
           deploymentId,
-          `دستور معادل روی VPS: docker compose -f ${project.build_file_path} up -d --build (شبکه: ${targetNetNames.join(', ')})`,
+          `دستور معادل روی VPS (BuildKit): docker compose -f ${project.build_file_path} up -d --build (شبکه: ${targetNetNames.join(', ')})`,
         );
       } else {
         appendDeployLog(
           deploymentId,
-          `دستور معادل روی VPS: docker build -t ${containerName}:latest -f ${project.build_file_path} ${project.dockerfile_context}`,
+          `دستور معادل روی VPS (BuildKit): docker build -t ${containerName}:latest -f ${project.build_file_path} ${project.dockerfile_context}`,
         );
         appendDeployLog(
           deploymentId,
@@ -365,13 +425,117 @@ async function executePipeline(
 
     const containerName = `sokkan-${project.slug}`;
 
-    if (project.build_mode === 'compose') {
+    if (deployStrategy === 'github_actions') {
+      appendDeployLog(
+        deploymentId,
+        'حالت GitHub Actions فعال است — بدون بیلد روی VPS، دریافت مستقیم ایمیج آماده (GHCR)...',
+      );
+      if (token) {
+        appendDeployLog(deploymentId, `احراز هویت در رجیستری ghcr.io با حساب ${owner}...`, secretsToMask);
+        const loginCode = await dockerLoginGhcr(owner, token, workspaceDir, deploymentId, secretsToMask);
+        if (loginCode !== 0) {
+          appendDeployLog(
+            deploymentId,
+            'هشدار: ورود به ghcr.io ناموفق بود (برای ایمیج‌های عمومی مشکلی نیست؛ برای ایمیج خصوصی دسترسی read:packages لازم است).',
+          );
+        }
+      }
+
+      if (project.build_mode === 'compose') {
+        const defaultGhcrFile = fs.existsSync(path.join(workspaceDir, 'docker-compose.ghcr.yml'))
+          ? 'docker-compose.ghcr.yml'
+          : project.build_file_path || 'docker-compose.yml';
+        const composeFile = resolveConfinedBuildFile(
+          workspaceDir,
+          project.actions_compose_file.trim() || defaultGhcrFile,
+          'docker-compose.ghcr.yml',
+        );
+        appendDeployLog(deploymentId, `دریافت ایمیج‌های آماده با ${composeFile} (docker compose pull)...`);
+        const pullCode = await runCommandSafe(
+          'docker',
+          ['compose', '-p', containerName, '-f', composeFile, 'pull'],
+          workspaceDir,
+          deploymentId,
+          undefined,
+          secretsToMask,
+        );
+        if (pullCode !== 0) {
+          throw new Error(`دریافت ایمیج‌های آماده (docker compose pull) ناموفق بود (کد ${pullCode}).`);
+        }
+        appendDeployLog(deploymentId, `اجرای سرویس‌ها بدون بیلد محلی (${composeFile})...`);
+        const upCode = await runCommandSafe(
+          'docker',
+          ['compose', '-p', containerName, '-f', composeFile, 'up', '-d', '--no-build', '--remove-orphans'],
+          workspaceDir,
+          deploymentId,
+          undefined,
+          secretsToMask,
+        );
+        if (upCode !== 0) {
+          throw new Error(`اجرای docker compose ناموفق بود (کد ${upCode}).`);
+        }
+      } else {
+        const imageRef = validateDockerImageRef(
+          project.ghcr_image.trim() || `ghcr.io/${owner.toLowerCase()}/${repo.toLowerCase()}:latest`,
+        );
+        appendDeployLog(deploymentId, `دریافت ایمیج آماده ${imageRef}...`);
+        const pullCode = await runCommandSafe(
+          'docker',
+          ['pull', imageRef],
+          workspaceDir,
+          deploymentId,
+          undefined,
+          secretsToMask,
+        );
+        if (pullCode !== 0) {
+          throw new Error(`دریافت ایمیج ${imageRef} ناموفق بود (کد ${pullCode}).`);
+        }
+
+        appendDeployLog(deploymentId, `جایگزینی کانتینر ${containerName} روی شبکه ${primaryNet}...`);
+        await runCommandSafe('docker', ['rm', '-f', containerName], workspaceDir, deploymentId).catch(
+          () => 0,
+        );
+
+        const runArgs = [
+          'run',
+          '-d',
+          '--name',
+          containerName,
+          '--network',
+          primaryNet,
+          '--network-alias',
+          project.slug,
+          '--restart',
+          'unless-stopped',
+          '--label',
+          'sokkan.managed=true',
+          '--label',
+          `sokkan.project=${project.slug}`,
+          '--label',
+          `sokkan.owner=${project.owner_user_id}`,
+        ];
+        if (fs.existsSync(path.join(workspaceDir, '.env'))) {
+          runArgs.push('--env-file', path.join(workspaceDir, '.env'));
+        }
+        runArgs.push(imageRef);
+
+        const runCode = await runCommandSafe('docker', runArgs, workspaceDir, deploymentId);
+        if (runCode !== 0) {
+          throw new Error(`اجرای کانتینر جدید با خطا مواجه شد (کد ${runCode}).`);
+        }
+
+        for (const extraNet of privateNets.slice(1)) {
+          appendDeployLog(deploymentId, `اتصال کانتینر به شبکه خصوصی ${extraNet.name} (${extraNet.docker_name})...`);
+          await connectContainerToNetwork(containerName, extraNet.docker_name, [project.slug]);
+        }
+      }
+    } else if (project.build_mode === 'compose') {
       const composeFile = resolveConfinedBuildFile(
         workspaceDir,
         project.build_file_path,
         'docker-compose.yml',
       );
-      appendDeployLog(deploymentId, `اجرای docker compose با فایل ${composeFile}...`);
+      appendDeployLog(deploymentId, `اجرای docker compose (BuildKit) با فایل ${composeFile}...`);
       const upCode = await runCommandSafe(
         'docker',
         ['compose', '-p', containerName, '-f', composeFile, 'up', '-d', '--build', '--remove-orphans'],
@@ -399,7 +563,7 @@ async function executePipeline(
       }
 
       const imageTag = `${containerName}:latest`;
-      appendDeployLog(deploymentId, `ساخت ایمیج داکر ${imageTag}...`);
+      appendDeployLog(deploymentId, `ساخت ایمیج داکر ${imageTag} با BuildKit...`);
       const buildCode = await runCommandSafe(
         'docker',
         ['build', '-t', imageTag, '-f', dockerfileRel, contextRel],
@@ -502,6 +666,7 @@ export async function runPollingCycle(): Promise<void> {
 
   for (const project of projects) {
     if (activeBuilds.has(project.id)) continue;
+    if (project.deploy_strategy === 'github_actions') continue;
     const lastPolledMs = project.last_polled_at ? Date.parse(project.last_polled_at) : 0;
     if (nowMs - lastPolledMs < project.polling_interval_sec * 1000) {
       continue;

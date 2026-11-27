@@ -160,6 +160,9 @@ function ensureColumn(tableName: 'projects' | 'services', columnName: string, co
 
 ensureColumn('projects', 'owner_user_id', "owner_user_id TEXT NOT NULL DEFAULT 'usr_admin'");
 ensureColumn('projects', 'private_network_id', 'private_network_id TEXT');
+ensureColumn('projects', 'deploy_strategy', "deploy_strategy TEXT NOT NULL DEFAULT 'local'");
+ensureColumn('projects', 'ghcr_image', "ghcr_image TEXT NOT NULL DEFAULT ''");
+ensureColumn('projects', 'actions_compose_file', "actions_compose_file TEXT NOT NULL DEFAULT ''");
 ensureColumn('services', 'owner_user_id', "owner_user_id TEXT NOT NULL DEFAULT 'usr_admin'");
 ensureColumn('services', 'private_network_id', 'private_network_id TEXT');
 
@@ -308,6 +311,9 @@ export interface ProjectRow {
   last_deployed_at: string | null;
   status: string;
   owner_user_id: string;
+  deploy_strategy: string;
+  ghcr_image: string;
+  actions_compose_file: string;
   private_network_id: string | null;
   created_at: string;
   updated_at: string;

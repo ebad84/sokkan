@@ -153,6 +153,7 @@ sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.so
 sudo apt-get update
 if ! command -v docker >/dev/null 2>&1; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker-buildx 2>/dev/null || true
 elif ! docker compose version >/dev/null 2>&1; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-v2
 fi
