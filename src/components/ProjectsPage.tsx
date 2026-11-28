@@ -12,9 +12,17 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiFetch, streamDeploymentLogs } from '../api';
-import type { Deployment, GitHubInspectionResult, PrivateNetwork, Project } from '../types';
+import { GitHubAppPanel, GitHubRepoPicker } from './GitHubAppPanel';
+import type {
+  Deployment,
+  GitHubAppRepo,
+  GitHubAppStatus,
+  GitHubInspectionResult,
+  PrivateNetwork,
+  Project,
+} from '../types';
 
 function extractOwnerRepoFromUrl(rawUrl: string): { owner: string; repo: string } | null {
   const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
@@ -330,9 +338,16 @@ export function ProjectsPage({
   const [actionError, setActionError] = useState('');
   const [deployingId, setDeployingId] = useState<string | null>(null);
 
+  // GitHub App one-click integration state
+  const [ghAppStatus, setGhAppStatus] = useState<GitHubAppStatus | null>(null);
+  const [ghAppRepos, setGhAppRepos] = useState<GitHubAppRepo[]>([]);
+  const [loadingGhRepos, setLoadingGhRepos] = useState(false);
+
   // Add project form state
   const [repoUrl, setRepoUrl] = useState('');
   const [githubToken, setGithubToken] = useState('');
+  const [selectedInstallationId, setSelectedInstallationId] = useState(0);
+  const [selectedRepoFullName, setSelectedRepoFullName] = useState('');
   const [inspecting, setInspecting] = useState(false);
   const [inspectResult, setInspectResult] = useState<GitHubInspectionResult | null>(null);
   const [inspectError, setInspectError] = useState('');
@@ -361,6 +376,7 @@ export function ProjectsPage({
     projectId: string;
     projectName: string;
     secret: string;
+    usedGithubApp?: boolean;
   } | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
@@ -387,6 +403,36 @@ export function ProjectsPage({
   const [editError, setEditError] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
 
+  const loadGitHubAppRepos = useCallback(async () => {
+    setLoadingGhRepos(true);
+    try {
+      const data = await apiFetch<{ repos: GitHubAppRepo[] }>('/api/github/app/repos');
+      setGhAppRepos(data.repos ?? []);
+    } catch {
+      setGhAppRepos([]);
+    } finally {
+      setLoadingGhRepos(false);
+    }
+  }, []);
+
+  const loadGitHubAppStatus = useCallback(async () => {
+    try {
+      const st = await apiFetch<GitHubAppStatus>('/api/github/app/status');
+      setGhAppStatus(st);
+      if (st.connected && st.installed) {
+        void loadGitHubAppRepos();
+      } else {
+        setGhAppRepos([]);
+      }
+    } catch {
+      setGhAppStatus(null);
+    }
+  }, [loadGitHubAppRepos]);
+
+  useEffect(() => {
+    void loadGitHubAppStatus();
+  }, [loadGitHubAppStatus]);
+
   useEffect(() => {
     if (openAddModalTrigger > 0) {
       setShowAddModal(true);
@@ -399,23 +445,36 @@ export function ProjectsPage({
     setTimeout(() => setCopiedKey(null), 1800);
   };
 
-  const handleInspectRepo = async () => {
+  const inspectRepoWithParams = async (
+    targetUrl: string,
+    targetBranch?: string,
+    installationId?: number,
+    preserveNames = false,
+  ) => {
     setInspecting(true);
     setInspectError('');
     setInspectResult(null);
     try {
-      const res = await apiFetch<GitHubInspectionResult>('/api/github/inspect', {
+      const res = await apiFetch<
+        GitHubInspectionResult & { authSource?: string; installationId?: number }
+      >('/api/github/inspect', {
         method: 'POST',
         body: JSON.stringify({
-          repoUrl,
-          branch: branch.trim() || undefined,
+          repoUrl: targetUrl,
+          branch: targetBranch?.trim() || undefined,
           githubToken: githubToken.trim() || undefined,
+          installationId: installationId || selectedInstallationId || undefined,
         }),
       });
       setInspectResult(res);
-      if (!nameTouched || !name.trim()) setName(res.repo);
-      if (!slugTouched || !slug.trim()) {
-        setSlug(toContainerSlug(res.repo));
+      if (res.installationId && res.installationId > 0) {
+        setSelectedInstallationId(res.installationId);
+      }
+      if (!preserveNames) {
+        if (!nameTouched || !name.trim()) setName(res.repo);
+        if (!slugTouched || !slug.trim()) {
+          setSlug(toContainerSlug(res.repo));
+        }
       }
       setBranch(res.defaultBranch);
       setBuildMode(res.detectedBuildMode === 'compose' ? 'compose' : 'dockerfile');
@@ -439,9 +498,33 @@ export function ProjectsPage({
     }
   };
 
+  const handleInspectRepo = async () => {
+    await inspectRepoWithParams(repoUrl, branch, selectedInstallationId);
+  };
+
+  const handleSelectAppRepo = (repo: GitHubAppRepo) => {
+    setSelectedRepoFullName(repo.fullName);
+    setSelectedInstallationId(repo.installationId);
+    setRepoUrl(repo.htmlUrl || `https://github.com/${repo.fullName}`);
+    setBranch(repo.defaultBranch || 'main');
+    setName(repo.name);
+    setSlug(toContainerSlug(repo.name));
+    setNameTouched(false);
+    setSlugTouched(false);
+    setGhcrImage(`ghcr.io/${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}:latest`);
+    void inspectRepoWithParams(
+      repo.htmlUrl || `https://github.com/${repo.fullName}`,
+      repo.defaultBranch,
+      repo.installationId,
+      true,
+    );
+  };
+
   const resetAddForm = () => {
     setRepoUrl('');
     setGithubToken('');
+    setSelectedInstallationId(0);
+    setSelectedRepoFullName('');
     setInspectResult(null);
     setInspectError('');
     setName('');
@@ -475,6 +558,7 @@ export function ProjectsPage({
         }
       }
 
+      const usedGithubApp = Boolean(selectedInstallationId > 0 && !githubToken.trim());
       const res = await apiFetch<{
         project: Project;
         generatedWebhookSecret: string;
@@ -500,6 +584,7 @@ export function ProjectsPage({
             autoDeployWebhook,
             pollingIntervalSec,
             githubToken,
+            githubInstallationId: selectedInstallationId || 0,
             envVars,
             lastCommitSha: inspectResult?.latestCommit?.sha ?? '',
             lastCommitMsg: inspectResult?.latestCommit?.message ?? '',
@@ -516,6 +601,7 @@ export function ProjectsPage({
         projectId: res.project.id,
         projectName: res.project.name,
         secret: res.generatedWebhookSecret,
+        usedGithubApp,
       });
       onRefresh();
     } catch (err) {
@@ -655,11 +741,28 @@ export function ProjectsPage({
 
   return (
     <div className="space-y-6">
+      <GitHubAppPanel
+        isAdmin={isAdmin}
+        status={ghAppStatus}
+        repos={ghAppRepos}
+        loadingRepos={loadingGhRepos}
+        onStatusChanged={() => {
+          void loadGitHubAppStatus();
+        }}
+        onQuickAddProject={() => setShowAddModal(true)}
+      />
+
       {createdWebhookInfo && (
-        <div className="bg-[#111827] border border-sky-500/40 rounded-xl p-5 space-y-3">
+        <div
+          className={`bg-[#111827] border rounded-xl p-5 space-y-3 ${
+            createdWebhookInfo.usedGithubApp ? 'border-emerald-500/40' : 'border-sky-500/40'
+          }`}
+        >
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold text-slate-100">
-              تنظیمات GitHub Webhook برای «{createdWebhookInfo.projectName}»
+              {createdWebhookInfo.usedGithubApp
+                ? `پروژه «${createdWebhookInfo.projectName}» از طریق GitHub App متصل شد`
+                : `تنظیمات GitHub Webhook برای «${createdWebhookInfo.projectName}»`}
             </h3>
             <button
               type="button"
@@ -669,8 +772,10 @@ export function ProjectsPage({
               <X className="w-4 h-4" />
             </button>
           </div>
-          <p className="text-xs text-slate-300">
-            برای دیپلوی آنی پس از هر Push، مقادیر زیر را در بخش Settings ← Webhooks مخزن گیتهاب وارد کنید (Content type: application/json):
+          <p className="text-xs text-slate-300 leading-relaxed">
+            {createdWebhookInfo.usedGithubApp
+              ? 'وب‌هوک خودکار GitHub App (برای Push و اتمام GitHub Actions) از قبل برای این مخزن فعال است و نیازی به تنظیم دستی در گیتهاب ندارید. مقادیر زیر فقط در صورت نیاز به تریگر سفارشی در Workflow ذخیره شده‌اند:'
+              : 'برای دیپلوی آنی پس از هر Push، مقادیر زیر را در بخش Settings ← Webhooks مخزن گیتهاب وارد کنید (Content type: application/json):'}
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
             <div className="bg-[#0B0F17] border border-[#1F2937] rounded-lg p-3 flex items-center justify-between gap-2">
@@ -959,6 +1064,18 @@ export function ProjectsPage({
             <form onSubmit={handleCreateProject} className="p-6 overflow-y-auto space-y-5 text-xs">
               {/* Step 1: Repo Inspection */}
               <div className="space-y-3">
+                {ghAppStatus?.connected && ghAppStatus.installed && (
+                  <GitHubRepoPicker
+                    repos={ghAppRepos}
+                    loading={loadingGhRepos}
+                    selectedFullName={selectedRepoFullName}
+                    onSelect={handleSelectAppRepo}
+                    onRefresh={() => {
+                      void loadGitHubAppRepos();
+                    }}
+                  />
+                )}
+
                 <label className="block font-medium text-slate-200">
                   ۱. آدرس مخزن گیتهاب و بررسی خودکار Dockerfile / Compose
                 </label>
@@ -970,6 +1087,7 @@ export function ProjectsPage({
                     onChange={(e) => {
                       const nextUrl = e.target.value;
                       setRepoUrl(nextUrl);
+                      setSelectedRepoFullName('');
                       const derived = extractRepoNameFromUrl(nextUrl);
                       if (derived) {
                         if (!nameTouched) setName(derived);
@@ -990,13 +1108,23 @@ export function ProjectsPage({
                   </button>
                 </div>
 
-                <input
-                  type="password"
-                  value={githubToken}
-                  onChange={(e) => setGithubToken(e.target.value)}
-                  placeholder="اختیاری: GitHub Personal Access Token (برای مخازن Private)"
-                  className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3.5 py-2 text-slate-100 font-mono focus:outline-none focus:border-sky-500"
-                />
+                {selectedInstallationId > 0 && !githubToken.trim() ? (
+                  <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2 text-emerald-300">
+                    احراز هویت خصوصی، دسترسی GHCR و وب‌هوک خودکار توسط GitHub App مدیریت می‌شود (نیازی به PAT نیست).
+                  </div>
+                ) : (
+                  <input
+                    type="password"
+                    value={githubToken}
+                    onChange={(e) => setGithubToken(e.target.value)}
+                    placeholder={
+                      ghAppStatus?.installed
+                        ? 'اختیاری: PAT دستی (در حالت عادی توسط GitHub App خودکار انجام می‌شود)'
+                        : 'اختیاری: GitHub Personal Access Token (برای مخازن Private)'
+                    }
+                    className="w-full bg-[#0B0F17] border border-[#1F2937] rounded-lg px-3.5 py-2 text-slate-100 font-mono focus:outline-none focus:border-sky-500"
+                  />
+                )}
 
                 {inspectError && (
                   <div className="text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">

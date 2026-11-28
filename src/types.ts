@@ -235,10 +235,47 @@ export interface Project {
   lastDeployedAt: string | null;
   status: string;
   ownerUserId?: string;
+  githubInstallationId?: number;
   privateNetworkId?: string | null;
   networks?: NetworkRef[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface GitHubAppInstallation {
+  id: number;
+  accountLogin: string;
+  accountType: string;
+  accountAvatarUrl: string;
+  repositorySelection: 'all' | 'selected';
+  htmlUrl: string;
+}
+
+export interface GitHubAppStatus {
+  connected: boolean;
+  installed: boolean;
+  appId: number | null;
+  slug: string;
+  name: string;
+  ownerLogin: string;
+  htmlUrl: string;
+  installUrl: string;
+  installations: GitHubAppInstallation[];
+  updatedAt: string | null;
+}
+
+export interface GitHubAppRepo {
+  id: number;
+  name: string;
+  fullName: string;
+  owner: string;
+  htmlUrl: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  isPrivate: boolean;
+  description: string;
+  updatedAt: string;
+  installationId: number;
 }
 
 export interface GitHubInspectionResult {

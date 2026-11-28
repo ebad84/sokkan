@@ -94,6 +94,21 @@ import {
   resolveCommandTemplate,
   serializeService,
 } from './server/templates.ts';
+import {
+  completeInstallationCallback,
+  completeManifestCallback,
+  createManifestRequest,
+  disconnectGitHubApp,
+  escapeHtml,
+  getGitHubAppForBackup,
+  getGitHubAppPublicStatus,
+  listGitHubAppRepositories,
+  listGitHubRepoBranches,
+  resolveGitHubTokenForRepo,
+  restoreGitHubAppFromBackup,
+  syncGitHubAppInstallations,
+  verifyGitHubAppWebhook,
+} from './server/githubApp.ts';
 import { checkForUpdates, getLocalVersionInfo } from './server/updater.ts';
 
 export interface AuthUser {
@@ -256,6 +271,103 @@ app.post(
   },
 );
 
+// Global GitHub App Webhook (auto-routes push & workflow_run events to matching projects)
+app.post(
+  '/api/webhooks/github-app',
+  express.raw({ type: 'application/json', limit: '2mb' }),
+  async (req: Request, res: Response) => {
+    try {
+      const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from('');
+      const sig = req.header('x-hub-signature-256') || '';
+      if (!verifyGitHubAppWebhook(rawBody, sig)) {
+        res.status(401).json({ error: 'امضای دیجیتال وب‌هوک GitHub App نامعتبر است.' });
+        return;
+      }
+
+      const eventType = req.header('x-github-event') || 'ping';
+      if (eventType === 'ping') {
+        res.json({ ok: true, message: 'پینگ وب‌هوک GitHub App با موفقیت دریافت شد.' });
+        return;
+      }
+
+      if (eventType === 'installation' || eventType === 'installation_repositories') {
+        void syncGitHubAppInstallations().catch(() => {});
+        res.json({ ok: true, synced: true });
+        return;
+      }
+
+      const payload = JSON.parse(rawBody.toString('utf8')) as {
+        ref?: string;
+        action?: string;
+        repository?: { full_name?: string; clone_url?: string };
+        workflow_run?: { conclusion?: string; head_branch?: string };
+      };
+
+      const repoFullName = String(payload.repository?.full_name || '').trim().toLowerCase();
+      if (!repoFullName || !repoFullName.includes('/')) {
+        res.json({ ok: true, ignored: true, message: 'اطلاعات مخزن در رویداد وجود ندارد.' });
+        return;
+      }
+      const targetCanonical = `https://github.com/${repoFullName}.git`;
+
+      const matchingProjects = (
+        db
+          .prepare('SELECT * FROM projects WHERE LOWER(repo_url) = ? AND auto_deploy_webhook = 1')
+          .all(targetCanonical) as ProjectRow[]
+      );
+
+      if (matchingProjects.length === 0) {
+        res.json({
+          ok: true,
+          ignored: true,
+          message: `هیچ پروژه فعالی در سکان برای مخزن ${repoFullName} ثبت نشده است.`,
+        });
+        return;
+      }
+
+      const triggered: string[] = [];
+      for (const project of matchingProjects) {
+        const expectedRef = `refs/heads/${project.branch}`;
+        if (eventType === 'workflow_run') {
+          if (payload.action !== 'completed' || payload.workflow_run?.conclusion !== 'success') {
+            continue;
+          }
+          if (payload.workflow_run?.head_branch && payload.workflow_run.head_branch !== project.branch) {
+            continue;
+          }
+        } else if (eventType === 'push') {
+          if (project.deploy_strategy === 'github_actions') {
+            // Wait for workflow_run completion when project builds via GitHub Actions
+            continue;
+          }
+          if (payload.ref && payload.ref !== expectedRef) {
+            continue;
+          }
+        } else {
+          continue;
+        }
+
+        try {
+          const dep = await triggerDeployment(project.id, 'webhook');
+          triggered.push(dep.id);
+        } catch {
+          // Skip projects already building
+        }
+      }
+
+      res.status(triggered.length > 0 ? 202 : 200).json({
+        ok: true,
+        triggeredCount: triggered.length,
+        deploymentIds: triggered,
+      });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'خطا در پردازش وب‌هوک GitHub App',
+      });
+    }
+  },
+);
+
 // Allow larger payloads specifically for full disaster-recovery backup imports
 app.use('/api/backup/import', express.json({ limit: '10mb' }));
 app.use(express.json({ limit: '2mb' }));
@@ -308,6 +420,7 @@ function serializeProject(p: ProjectRow) {
     lastDeployedAt: p.last_deployed_at,
     status: p.status,
     ownerUserId: p.owner_user_id,
+    githubInstallationId: p.github_installation_id || 0,
     privateNetworkId: p.private_network_id,
     networks,
     createdAt: p.created_at,
@@ -1553,14 +1666,177 @@ app.post('/api/system/check-update', requireAuth, async (_req: AuthenticatedRequ
   }
 });
 
+// One-Click GitHub App Integration (Manifest Flow + Installations + Repo Picker)
+app.get('/api/github/app/status', requireAuth, (_req: AuthenticatedRequest, res) => {
+  res.json(getGitHubAppPublicStatus());
+});
+
+app.post('/api/github/app/manifest', requireAuth, requireAdmin, (req: AuthenticatedRequest, res) => {
+  try {
+    const body = req.body ?? {};
+    const clientOrigin = typeof body.baseUrl === 'string' ? body.baseUrl.trim() : undefined;
+    const appName = typeof body.appName === 'string' ? body.appName.trim() : undefined;
+    const organization = typeof body.organization === 'string' ? body.organization.trim() : undefined;
+    const result = createManifestRequest({
+      userId: req.authUser!.id,
+      clientOrigin,
+      appName,
+      organization,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'خطا در آماده‌سازی اتصال به گیتهاب',
+    });
+  }
+});
+
+app.get(['/api/github/app/callback', '/api/github/app/callback/'], async (req, res) => {
+  const code = typeof req.query.code === 'string' ? req.query.code : '';
+  const state = typeof req.query.state === 'string' ? req.query.state : '';
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  try {
+    const { status, installUrl } = await completeManifestCallback(code, state);
+    const safeInstallUrl = escapeHtml(installUrl);
+    const safeName = escapeHtml(status.name || status.slug);
+    res.send(`<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head><meta charset="utf-8" /><title>اتصال سکان به گیتهاب</title></head>
+<body style="background:#0B0F17;color:#F8FAFC;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center;">
+  <div style="max-width:460px;background:#111827;border:1px solid #1F2937;border-radius:14px;padding:28px;">
+    <h2 style="margin:0 0 10px;font-size:18px;color:#38BDF8;">اپلیکیشن گیتهاب «${safeName}» ساخته شد</h2>
+    <p style="margin:0 0 18px;font-size:13px;color:#94A3B8;line-height:1.7;">
+      در حال انتقال خودکار به مرحله انتخاب مخازن...
+    </p>
+    <a href="${safeInstallUrl}" style="display:inline-block;padding:10px 18px;background:#0EA5E9;color:#020617;font-weight:700;border-radius:8px;text-decoration:none;font-size:13px;">
+      ادامه و انتخاب مخازن در گیتهاب
+    </a>
+  </div>
+  <script>
+    try {
+      if (window.opener) {
+        window.opener.postMessage({ type: 'SOKKAN_GITHUB_APP_EVENT', stage: 'created' }, '*');
+      }
+    } catch (e) {}
+    setTimeout(function () {
+      window.location.href = ${JSON.stringify(installUrl)};
+    }, 600);
+  </script>
+</body>
+</html>`);
+  } catch (err) {
+    const safeErr = escapeHtml(err instanceof Error ? err.message : 'خطا در تکمیل اتصال گیتهاب');
+    res.status(400).send(`<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head><meta charset="utf-8" /><title>خطا در اتصال گیتهاب</title></head>
+<body style="background:#0B0F17;color:#F8FAFC;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center;">
+  <div style="max-width:460px;background:#111827;border:1px solid #7F1D1D;border-radius:14px;padding:28px;">
+    <h2 style="margin:0 0 10px;font-size:17px;color:#F87171;">اتصال به گیتهاب تکمیل نشد</h2>
+    <p style="margin:0 0 16px;font-size:13px;color:#CBD5E1;line-height:1.7;">${safeErr}</p>
+    <button onclick="window.close()" style="padding:8px 16px;background:#1F2937;color:#F8FAFC;border:none;border-radius:8px;cursor:pointer;font-size:13px;">بستن پنجره</button>
+  </div>
+</body>
+</html>`);
+  }
+});
+
+app.get(['/api/github/app/installed', '/api/github/app/installed/'], async (req, res) => {
+  const installationId = Number(req.query.installation_id || 0);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  try {
+    const status = await completeInstallationCallback(installationId);
+    const accounts = escapeHtml(status.installations.map((i) => '@' + i.accountLogin).join('، '));
+    res.send(`<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head><meta charset="utf-8" /><title>گیتهاب متصل شد</title></head>
+<body style="background:#0B0F17;color:#F8FAFC;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center;">
+  <div style="max-width:460px;background:#111827;border:1px solid #065F46;border-radius:14px;padding:28px;">
+    <h2 style="margin:0 0 10px;font-size:18px;color:#34D399;">اتصال یک‌کلیکی گیتهاب با موفقیت انجام شد</h2>
+    <p style="margin:0 0 16px;font-size:13px;color:#CBD5E1;line-height:1.7;">
+      حساب متصل‌شده: ${accounts || 'تایید شد'}. این پنجره به‌صورت خودکار بسته می‌شود...
+    </p>
+    <button onclick="window.close()" style="padding:8px 16px;background:#0EA5E9;color:#020617;font-weight:700;border:none;border-radius:8px;cursor:pointer;font-size:13px;">بازگشت به سکان</button>
+  </div>
+  <script>
+    try {
+      if (window.opener) {
+        window.opener.postMessage({ type: 'SOKKAN_GITHUB_APP_EVENT', stage: 'installed' }, '*');
+        setTimeout(function () { window.close(); }, 900);
+      } else {
+        setTimeout(function () { window.location.href = '/'; }, 1200);
+      }
+    } catch (e) {}
+  </script>
+</body>
+</html>`);
+  } catch (err) {
+    const safeErr = escapeHtml(err instanceof Error ? err.message : 'خطا در تایید نصب GitHub App');
+    res.status(400).send(`<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head><meta charset="utf-8" /><title>خطا در تایید نصب</title></head>
+<body style="background:#0B0F17;color:#F8FAFC;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center;">
+  <div style="max-width:460px;background:#111827;border:1px solid #7F1D1D;border-radius:14px;padding:28px;">
+    <h2 style="margin:0 0 10px;font-size:17px;color:#F87171;">تایید نصب گیتهاب ناموفق بود</h2>
+    <p style="margin:0 0 16px;font-size:13px;color:#CBD5E1;line-height:1.7;">${safeErr}</p>
+    <button onclick="window.close()" style="padding:8px 16px;background:#1F2937;color:#F8FAFC;border:none;border-radius:8px;cursor:pointer;font-size:13px;">بستن پنجره</button>
+  </div>
+</body>
+</html>`);
+  }
+});
+
+app.post('/api/github/app/sync', requireAuth, requireAdmin, async (_req: AuthenticatedRequest, res) => {
+  try {
+    const status = await syncGitHubAppInstallations();
+    res.json(status);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'خطا در همگام‌سازی اتصال گیتهاب',
+    });
+  }
+});
+
+app.get('/api/github/app/repos', requireAuth, async (_req: AuthenticatedRequest, res) => {
+  try {
+    const repos = await listGitHubAppRepositories();
+    res.json({ repos });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'خطا در دریافت لیست مخازن گیتهاب',
+    });
+  }
+});
+
+app.get('/api/github/app/branches', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const owner = typeof req.query.owner === 'string' ? req.query.owner.trim() : '';
+    const repo = typeof req.query.repo === 'string' ? req.query.repo.trim() : '';
+    const installationId = Number(req.query.installationId || 0) || undefined;
+    const branches = await listGitHubRepoBranches(owner, repo, installationId);
+    res.json({ branches });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'خطا در دریافت لیست شاخه‌ها',
+    });
+  }
+});
+
+app.delete('/api/github/app', requireAuth, requireAdmin, (_req: AuthenticatedRequest, res) => {
+  disconnectGitHubApp();
+  res.json({ ok: true });
+});
+
 // GitHub Repository Inspector
 app.post('/api/github/inspect', requireAuth, async (req, res) => {
   try {
     const repoUrl = typeof req.body?.repoUrl === 'string' ? req.body.repoUrl : '';
     const branch = typeof req.body?.branch === 'string' ? req.body.branch : undefined;
-    const token = typeof req.body?.githubToken === 'string' ? req.body.githubToken : undefined;
-    const result = await inspectGitHubRepo(repoUrl, branch, token);
-    res.json(result);
+    const explicitToken = typeof req.body?.githubToken === 'string' ? req.body.githubToken.trim() : '';
+    const installationId = Number(req.body?.installationId || 0) || undefined;
+    const { owner } = parseGitHubRepoUrl(repoUrl);
+    const resolved = await resolveGitHubTokenForRepo(owner, explicitToken, installationId);
+    const result = await inspectGitHubRepo(repoUrl, branch, resolved.token || undefined);
+    res.json({ ...result, authSource: resolved.source, installationId: resolved.installationId });
   } catch (err) {
     res.status(400).json({
       error: err instanceof Error ? err.message : 'خطا در بررسی مخزن گیتهاب',
@@ -1670,6 +1946,10 @@ app.post('/api/projects', requireAuth, async (req: AuthenticatedRequest, res) =>
 
     const id = `prj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const now = new Date().toISOString();
+    const githubInstallationId =
+      Number.isInteger(Number(body.githubInstallationId)) && Number(body.githubInstallationId) > 0
+        ? Number(body.githubInstallationId)
+        : 0;
 
     db.prepare(
       `INSERT INTO projects (
@@ -1677,8 +1957,8 @@ app.post('/api/projects', requireAuth, async (req: AuthenticatedRequest, res) =>
         build_file_path, dockerfile_context,
         container_port, domain, caddy_enabled, caddy_extra_directives, auto_deploy_webhook,
         polling_interval_sec, github_token_enc, webhook_secret_enc, env_vars_enc,
-        last_commit_sha, last_commit_msg, status, owner_user_id, private_network_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?)`,
+        last_commit_sha, last_commit_msg, status, owner_user_id, github_installation_id, private_network_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?, ?)`,
     ).run(
       id,
       name,
@@ -1703,6 +1983,7 @@ app.post('/api/projects', requireAuth, async (req: AuthenticatedRequest, res) =>
       String(body.lastCommitSha || ''),
       String(body.lastCommitMsg || ''),
       user.id,
+      githubInstallationId,
       privateNet?.id ?? null,
       now,
       now,
@@ -2710,11 +2991,13 @@ function buildFullBackupPayload(): Record<string, unknown> {
         lastCommitMsg: p.last_commit_msg,
         lastDeployedAt: p.last_deployed_at,
         ownerUserId: p.owner_user_id,
+        githubInstallationId: p.github_installation_id || 0,
         privateNetworkId: p.private_network_id,
         createdAt: p.created_at,
         updatedAt: p.updated_at,
       };
     }),
+    githubApp: getGitHubAppForBackup(),
     beszel: {
       enabled: beszel.enabled,
       url: beszel.url,
@@ -2799,6 +3082,7 @@ app.post('/api/backup/import', requireAuth, requireAdmin, async (req: Authentica
       services: 0,
       projects: 0,
       caddySnapshots: 0,
+      githubAppRestored: false,
       beszelRestored: false,
       caddyfileRestored: false,
       servicesRedeployed: 0,
@@ -2828,6 +3112,7 @@ app.post('/api/backup/import', requireAuth, requireAdmin, async (req: Authentica
         db.prepare('DELETE FROM services').run();
         db.prepare('DELETE FROM private_networks').run();
         db.prepare('DELETE FROM caddy_snapshots').run();
+        db.prepare('DELETE FROM github_apps').run();
         db.prepare('DELETE FROM users').run();
       }
 
@@ -3080,9 +3365,9 @@ app.post('/api/backup/import', requireAuth, requireAdmin, async (req: Authentica
             build_file_path, dockerfile_context,
             container_port, domain, caddy_enabled, caddy_extra_directives, auto_deploy_webhook,
             polling_interval_sec, github_token_enc, webhook_secret_enc, env_vars_enc,
-            last_commit_sha, last_commit_msg, last_deployed_at, status, owner_user_id, private_network_id,
+            last_commit_sha, last_commit_msg, last_deployed_at, status, owner_user_id, github_installation_id, private_network_id,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?, ?)`,
         ).run(
           id,
           String(rawProj.name || slug),
@@ -3108,6 +3393,9 @@ app.post('/api/backup/import', requireAuth, requireAdmin, async (req: Authentica
           String(rawProj.lastCommitMsg || ''),
           typeof rawProj.lastDeployedAt === 'string' ? rawProj.lastDeployedAt : null,
           resolveOwnerId(rawProj.ownerUserId),
+          Number.isInteger(Number(rawProj.githubInstallationId)) && Number(rawProj.githubInstallationId) > 0
+            ? Number(rawProj.githubInstallationId)
+            : 0,
           primaryNetId,
           typeof rawProj.createdAt === 'string' && rawProj.createdAt ? rawProj.createdAt : now,
           typeof rawProj.updatedAt === 'string' && rawProj.updatedAt ? rawProj.updatedAt : now,
@@ -3158,7 +3446,14 @@ app.post('/api/backup/import', requireAuth, requireAdmin, async (req: Authentica
         if (info.changes > 0) counts.networkAttachments += 1;
       }
 
-      // 6. Restore Beszel Configuration (including decrypted password re-encrypted under new key)
+      // 6. Restore GitHub App (private key, webhook secret, installations re-encrypted under new key)
+      if (data.githubApp && typeof data.githubApp === 'object') {
+        if (restoreGitHubAppFromBackup(data.githubApp)) {
+          counts.githubAppRestored = true;
+        }
+      }
+
+      // 7. Restore Beszel Configuration (including decrypted password re-encrypted under new key)
       if (data.beszel && typeof data.beszel === 'object') {
         const b = data.beszel as Record<string, unknown>;
         try {

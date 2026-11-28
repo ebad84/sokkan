@@ -24,6 +24,7 @@ import {
   parseGitHubRepoUrl,
   validateBranchName,
 } from './github.ts';
+import { resolveGitHubTokenForRepo } from './githubApp.ts';
 
 export const deployLogBus = new EventEmitter();
 const activeBuilds = new Set<string>();
@@ -240,12 +241,23 @@ async function executePipeline(
   deploymentId: string,
   executionMode: 'vps' | 'sandbox',
 ): Promise<void> {
-  const token = decryptSecret(project.github_token_enc);
+  const manualPat = decryptSecret(project.github_token_enc);
+  let token = manualPat;
   const envMap = parseEnvVarsJson(decryptSecret(project.env_vars_enc));
 
   try {
     appendDeployLog(deploymentId, `شروع پایپ‌لاین برای «${project.name}» (${project.slug})`);
     const { owner, repo, canonicalUrl } = parseGitHubRepoUrl(project.repo_url);
+    const resolvedAuth = await resolveGitHubTokenForRepo(
+      owner,
+      manualPat,
+      project.github_installation_id || undefined,
+    );
+    token = resolvedAuth.token;
+    const ghcrUsername = resolvedAuth.username || owner;
+    if (resolvedAuth.source === 'github_app') {
+      appendDeployLog(deploymentId, 'احراز هویت گیتهاب از طریق توکن موقت GitHub App انجام شد.');
+    }
     const deployStrategy = project.deploy_strategy === 'github_actions' ? 'github_actions' : 'local';
     const branch = validateBranchName(project.branch);
 
@@ -431,8 +443,18 @@ async function executePipeline(
         'حالت GitHub Actions فعال است — بدون بیلد روی VPS، دریافت مستقیم ایمیج آماده (GHCR)...',
       );
       if (token) {
-        appendDeployLog(deploymentId, `احراز هویت در رجیستری ghcr.io با حساب ${owner}...`, secretsToMask);
-        const loginCode = await dockerLoginGhcr(owner, token, workspaceDir, deploymentId, secretsToMask);
+        appendDeployLog(
+          deploymentId,
+          `احراز هویت در رجیستری ghcr.io (${resolvedAuth.source === 'github_app' ? 'GitHub App' : `حساب ${owner}`})...`,
+          secretsToMask,
+        );
+        const loginCode = await dockerLoginGhcr(
+          ghcrUsername,
+          token,
+          workspaceDir,
+          deploymentId,
+          secretsToMask,
+        );
         if (loginCode !== 0) {
           appendDeployLog(
             deploymentId,
@@ -678,8 +700,18 @@ export async function runPollingCycle(): Promise<void> {
     );
 
     try {
-      const token = decryptSecret(project.github_token_enc);
-      const latest = await fetchLatestGitHubCommit(project.repo_url, project.branch, token);
+      const manualPat = decryptSecret(project.github_token_enc);
+      const { owner } = parseGitHubRepoUrl(project.repo_url);
+      const resolvedAuth = await resolveGitHubTokenForRepo(
+        owner,
+        manualPat,
+        project.github_installation_id || undefined,
+      );
+      const latest = await fetchLatestGitHubCommit(
+        project.repo_url,
+        project.branch,
+        resolvedAuth.token,
+      );
       if (latest && latest.sha && project.last_commit_sha && latest.sha !== project.last_commit_sha) {
         await triggerDeployment(project.id, 'polling');
       } else if (latest && latest.sha && !project.last_commit_sha) {

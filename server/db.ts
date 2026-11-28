@@ -149,6 +149,21 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS github_apps (
+    id TEXT PRIMARY KEY,
+    app_id INTEGER UNIQUE NOT NULL,
+    slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    owner_login TEXT NOT NULL DEFAULT '',
+    html_url TEXT NOT NULL DEFAULT '',
+    client_id TEXT NOT NULL DEFAULT '',
+    client_secret_enc TEXT NOT NULL DEFAULT '',
+    webhook_secret_enc TEXT NOT NULL DEFAULT '',
+    private_key_enc TEXT NOT NULL DEFAULT '',
+    installations_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
 `);
 
 function ensureColumn(tableName: 'projects' | 'services', columnName: string, columnSql: string): void {
@@ -163,6 +178,7 @@ ensureColumn('projects', 'private_network_id', 'private_network_id TEXT');
 ensureColumn('projects', 'deploy_strategy', "deploy_strategy TEXT NOT NULL DEFAULT 'local'");
 ensureColumn('projects', 'ghcr_image', "ghcr_image TEXT NOT NULL DEFAULT ''");
 ensureColumn('projects', 'actions_compose_file', "actions_compose_file TEXT NOT NULL DEFAULT ''");
+ensureColumn('projects', 'github_installation_id', 'github_installation_id INTEGER NOT NULL DEFAULT 0');
 ensureColumn('services', 'owner_user_id', "owner_user_id TEXT NOT NULL DEFAULT 'usr_admin'");
 ensureColumn('services', 'private_network_id', 'private_network_id TEXT');
 
@@ -314,7 +330,24 @@ export interface ProjectRow {
   deploy_strategy: string;
   ghcr_image: string;
   actions_compose_file: string;
+  github_installation_id: number;
   private_network_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GitHubAppRow {
+  id: string;
+  app_id: number;
+  slug: string;
+  name: string;
+  owner_login: string;
+  html_url: string;
+  client_id: string;
+  client_secret_enc: string;
+  webhook_secret_enc: string;
+  private_key_enc: string;
+  installations_json: string;
   created_at: string;
   updated_at: string;
 }
